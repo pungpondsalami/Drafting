@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=drafting
+Exec=drafting
+Icon=org.gnome.Example
+Terminal=false
+Type=Application
+Categories=Utility;
+Keywords=GTK;
+StartupNotify=true
+DBusActivatable=true

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/pungpondsalami/drafting">
+    <file preprocess="xml-stripblanks">window.ui</file>
+    <file preprocess="xml-stripblanks">shortcuts-dialog.ui</file>
+    <file>icons/draw-line-symbolic.svg</file>
+    <file>icons/circle-outline-thick-symbolic.svg</file>
+    <file>icons/magnet-symbolic.svg</file>
+  </gresource>
+</gresources>
