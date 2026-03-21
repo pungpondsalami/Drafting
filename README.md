@@ -1,3 +1,3 @@
-# drafting
+# Drafting
 
-A description of this project.
+A modern CAD software application.
