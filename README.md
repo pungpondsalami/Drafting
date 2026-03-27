@@ -3,5 +3,5 @@
 
 A modern CAD software.
 
-<img width="2000" height="1500" alt="IMG_20260326_204046" src="https://github.com/user-attachments/assets/051df22f-c51e-4f19-93bc-49359ff4b1d3" />
+<img width="1512" height="1134" alt="IMG_20260327_153617" src="https://github.com/user-attachments/assets/8804f0ba-1f31-4ec2-a75a-411cbaaf0339" />
 
