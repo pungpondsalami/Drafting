@@ -39,6 +39,11 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Set GTK env vars
         run: |
           $gtk = "C:\gtk-build\gtk\x64\release"
@@ -67,10 +72,7 @@ jobs:
           }
 
       - name: Build Drafting
-        shell: cmd
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --release --target x86_64-pc-windows-msvc
 
       - name: Compile GResource
         run: |
