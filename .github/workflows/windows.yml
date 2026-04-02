@@ -54,6 +54,18 @@ jobs:
           echo "X86_64_PC_WINDOWS_MSVC_GETTEXT_LIB_DIR=$gtk\lib"            >> $env:GITHUB_ENV
           echo "X86_64_PC_WINDOWS_MSVC_GETTEXT_INCLUDE_DIR=$gtk\include"    >> $env:GITHUB_ENV
 
+      - name: Find gettext lib
+        run: |
+          $gtk = "C:\gtk-build\gtk\x64\release"
+          # gettext-sys หา intl.lib ไม่เจอ ต้อง copy ให้มันเจอ
+          $lib = Get-ChildItem -Path $gtk -Recurse -Filter "intl.lib" | Select-Object -First 1
+          if ($lib) {
+            Write-Host "Found: $($lib.FullName)"
+          } else {
+            Write-Host "intl.lib not found, listing libs:"
+            Get-ChildItem "$gtk\lib" -Filter "*.lib" | Select-Object Name
+          }
+
       - name: Build Drafting
         run: cargo build --release --target x86_64-pc-windows-msvc
 
