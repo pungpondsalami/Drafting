@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\gtk-build
-          key: gvsbuild-gtk4-libadwaita-${{ runner.os }}-v2
+          key: gvsbuild-gtk4-libadwaita-${{ runner.os }}-v3
 
       - name: Build GTK4 + libadwaita
         if: steps.cache-gtk.outputs.cache-hit != 'true'
