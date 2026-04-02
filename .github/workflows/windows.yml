@@ -53,7 +53,7 @@ jobs:
           echo "GTK_ROOT=$gtk"                       >> $env:GITHUB_ENV
 
       - name: Build Drafting
-        run: cargo build --release --target x86_64-pc-windows-msvc --locked --locked
+        run: cargo build --release --target x86_64-pc-windows-msvc --locked
 
       - name: Compile GResource
         run: |
