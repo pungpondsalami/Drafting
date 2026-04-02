@@ -71,6 +71,21 @@ jobs:
             Get-ChildItem "$gtk\lib" -Filter "*.lib" | Select-Object Name
           }
 
+      - name: Symlink intl.lib for gettext-sys
+        run: |
+          $gtk = "C:\gtk-build\gtk\x64\release\lib"
+          # gettext-sys หา intl.lib — gvsbuild อาจตั้งชื่อต่างออกไป
+          Get-ChildItem $gtk -Filter "*.lib" | Select-Object Name
+          # ถ้ามี libintl.lib ให้ copy เป็น intl.lib
+          if (Test-Path "$gtk\libintl.lib") {
+            Copy-Item "$gtk\libintl.lib" "$gtk\intl.lib"
+            Write-Host "Copied libintl.lib -> intl.lib"
+          } elseif (Test-Path "$gtk\intl.lib") {
+            Write-Host "intl.lib already exists"
+          } else {
+            Write-Host "Neither intl.lib nor libintl.lib found!"
+          }
+
       - name: Build Drafting
         run: cargo build --release --target x86_64-pc-windows-msvc
 
