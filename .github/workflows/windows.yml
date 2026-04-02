@@ -47,11 +47,12 @@ jobs:
       - name: Set GTK env vars
         run: |
           $gtk = "C:\gtk-build\gtk\x64\release"
-          echo "PKG_CONFIG_PATH=$gtk\lib\pkgconfig" >> $env:GITHUB_ENV
-          echo "PATH=$gtk\bin;$env:PATH"             >> $env:GITHUB_ENV
-          echo "LIB=$gtk\lib"                        >> $env:GITHUB_ENV
-          echo "GTK_ROOT=$gtk"                       >> $env:GITHUB_ENV
-
+          echo "PKG_CONFIG_PATH=$gtk\lib\pkgconfig"    >> $env:GITHUB_ENV
+          echo "PATH=$gtk\bin;$env:PATH"                >> $env:GITHUB_ENV
+          echo "GTK_ROOT=$gtk"                          >> $env:GITHUB_ENV
+          # Append GTK lib ต่อท้าย LIB เดิม (ไม่ทับ Windows SDK)
+          echo "LIB=$env:LIB;$gtk\lib"                 >> $env:GITHUB_ENV
+          
       - name: Build Drafting
         run: cargo build --release --target x86_64-pc-windows-msvc --locked
 
