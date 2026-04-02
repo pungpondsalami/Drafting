@@ -50,6 +50,9 @@ jobs:
           echo "GETTEXT_BIN_DIR=$gtk\bin"            >> $env:GITHUB_ENV
           echo "GETTEXT_LIB_DIR=$gtk\lib"            >> $env:GITHUB_ENV
           echo "GETTEXT_INCLUDE_DIR=$gtk\include"    >> $env:GITHUB_ENV
+          echo "X86_64_PC_WINDOWS_MSVC_GETTEXT_DIR=$gtk"                    >> $env:GITHUB_ENV
+          echo "X86_64_PC_WINDOWS_MSVC_GETTEXT_LIB_DIR=$gtk\lib"            >> $env:GITHUB_ENV
+          echo "X86_64_PC_WINDOWS_MSVC_GETTEXT_INCLUDE_DIR=$gtk\include"    >> $env:GITHUB_ENV
 
       - name: Build Drafting
         run: cargo build --release --target x86_64-pc-windows-msvc
