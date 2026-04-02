@@ -27,17 +27,22 @@ mod spatial;
 use self::application::DraftingApplication;
 use self::window::DraftingWindow;
 
+#[cfg(not(windows))]
 use config::{GETTEXT_PACKAGE, LOCALEDIR};
-use gettextrs::{bind_textdomain_codeset, bindtextdomain, textdomain};
 use gtk::{gio, glib};
 use gtk::prelude::*;
+#[cfg(not(windows))]
+use gettextrs::{bind_textdomain_codeset, bindtextdomain, textdomain};
 
 fn main() -> glib::ExitCode {
-    // Set up gettext translations
-    bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR).expect("Unable to bind the text domain");
-    bind_textdomain_codeset(GETTEXT_PACKAGE, "UTF-8")
-        .expect("Unable to set the text domain encoding");
-    textdomain(GETTEXT_PACKAGE).expect("Unable to switch to the text domain");
+    // Set up gettext translations (Linux/Mac only)
+    #[cfg(not(windows))]
+    {
+        bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR).expect("Unable to bind the text domain");
+        bind_textdomain_codeset(GETTEXT_PACKAGE, "UTF-8")
+            .expect("Unable to set the text domain encoding");
+        textdomain(GETTEXT_PACKAGE).expect("Unable to switch to the text domain");
+    }
 
     // Load resources
     let res_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/drafting.gresource"));
