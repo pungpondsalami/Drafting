@@ -17,3 +17,4 @@ features = ["v1_6"]
 glib-build-tools = "0.20"
 
 [target.'cfg(not(windows))'.dependencies]
+gettext-rs = { version = "0.7", features = ["gettext-system"] }
