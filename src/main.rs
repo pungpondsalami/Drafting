@@ -27,7 +27,7 @@ mod spatial;
 use self::application::DraftingApplication;
 use self::window::DraftingWindow;
 
-use config::{GETTEXT_PACKAGE, LOCALEDIR, PKGDATADIR};
+use config::{GETTEXT_PACKAGE, LOCALEDIR};
 use gettextrs::{bind_textdomain_codeset, bindtextdomain, textdomain};
 use gtk::{gio, glib};
 use gtk::prelude::*;
@@ -40,18 +40,10 @@ fn main() -> glib::ExitCode {
     textdomain(GETTEXT_PACKAGE).expect("Unable to switch to the text domain");
 
     // Load resources
-    let res_path = format!("{}/drafting.gresource", PKGDATADIR);
-
-    let resources = if std::path::Path::new(&res_path).exists() {
-        // ✅ กรณีรันใน Flatpak (จะเจอไฟล์ที่ /app/share/...)
-        gio::Resource::load(&res_path)
-    } else {
-        // 🛠️ กรณีรันบน Host หรือ Dev (หาไฟล์ข้างๆ Cargo.toml)
-        gio::Resource::load("./drafting.gresource")
-    }.expect("Failed to load gresource file. มั่นใจนะว่ามีไฟล์ .gresource อยู่ถูกที่?");
-
-    gio::resources_register(&resources);
-
+    let res_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/drafting.gresource"));
+    let resource = gio::Resource::from_data(&glib::Bytes::from(&res_bytes[..]))
+        .expect("Failed to load gresource from data");
+    gio::resources_register(&resource);
     // Create a new GtkApplication. The application manages our main loop,
     // application windows, integration with the window manager/compositor, and
     // desktop features such as file opening and single-instance applications.

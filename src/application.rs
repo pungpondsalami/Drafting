@@ -18,13 +18,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-use gtk::prelude::*;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
-use crate::config::VERSION;
 use crate::DraftingWindow;
+use crate::config::VERSION;
 
 mod imp {
     use super::*;
@@ -56,18 +55,62 @@ mod imp {
         fn activate(&self) {
             let application = self.obj();
 
-            // โหลด CSS
+            // โหลด CSS — drafting-floating บังคับโปร่งทับแคนวาส (Yaru/OS บางตัวทำ osd/toolbar ทึบ)
             let provider = gtk::CssProvider::new();
-            provider.load_from_string("
+            provider.load_from_string(r#"
                 stack {
                     transition: min-width 300ms cubic-bezier(0.34, 1.56, 0.64, 1),
                                 min-height 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
                 }
-            ");
+
+                .drafting-floating {
+                    background-color: alpha(#2d2d2d, 0.68);
+                    background-image: none;
+                    color: #f6f5f4;
+                    border-radius: 18px;
+                    padding: 8px;
+                    border: 1px solid alpha(white, 0.12);
+                    box-shadow: 0 3px 16px alpha(black, 0.45);
+                }
+
+                .drafting-floating label {
+                    color: #f6f5f4;
+                }
+
+                /* ปุ่ม suggested-action พื้นหลังสว่าง — ตัวหนังสือดำ (override กฎด้านบนเพราะ specificity สูงกว่า) */
+                .drafting-floating button.drafting-apply-array,
+                .drafting-floating button.drafting-apply-array label {
+                    color: #1c1c1c;
+                }
+
+                .drafting-floating separator {
+                    background: alpha(white, 0.18);
+                    min-width: 1px;
+                    min-height: 1px;
+                }
+
+                .drafting-floating entry {
+                    background-color: alpha(black, 0.35);
+                    color: #f6f5f4;
+                    border: 1px solid alpha(white, 0.14);
+                    border-radius: 10px;
+                }
+                /* ลดขนาดปุ่ม Window Controls ให้เล็กกะทัดรัด */
+                windowcontrols button {
+                    min-width: 26px;
+                    min-height: 26px;
+                    padding: 0;
+                    margin: 0 2px;
+                }
+
+                .toolbar windowcontrols {
+                    padding: 4px;
+                }
+            "#);
             gtk::style_context_add_provider_for_display(
                 &gtk::gdk::Display::default().unwrap(),
                 &provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                gtk::STYLE_PROVIDER_PRIORITY_USER,
             );
 
             let window = application.active_window().unwrap_or_else(|| {
@@ -118,8 +161,7 @@ impl DraftingApplication {
             .developer_name("Supakit Suptorranee")
             .version(VERSION)
             .copyright("© 2026 Supakit Suptorranee")
-            // คอมเมนต์บรรทัดไอคอนออกชั่วคราวครับ
-            // .application_icon("com.pungpondsalami.drafting")
+            .application_icon("com.pungpondsalami.drafting")
             .build();
 
         // 3. สั่งแสดงผล

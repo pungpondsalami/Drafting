@@ -6,5 +6,13 @@
     <file>icons/draw-line-symbolic.svg</file>
     <file>icons/circle-outline-thick-symbolic.svg</file>
     <file>icons/magnet-symbolic.svg</file>
+    <file>icons/ruler-outline-horizontal-symbolic.svg</file>
+    <file>icons/plus-large-square-outline-symbolic.svg</file>
+    <file>icons/arrow-hook-left-horizontal2-symbolic.svg</file>
+    <file>icons/arrow-turn-right-horizontal2-symbolic.svg</file>
+    <file>icons/grid-filled-symbolic.svg</file>
+    <file>icons/arrow-pointing-at-line-down-symbolic.svg</file>
+    <file>icons/four-arrows-pointing-outward-symbolic.svg</file>
   </gresource>
 </gresources>
+

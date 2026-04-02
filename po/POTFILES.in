@@ -1,6 +1,6 @@
 # List of source files containing translatable strings.
 # Please keep this file sorted alphabetically.
-data/org.gnome.Example.desktop.in
-data/org.gnome.Example.metainfo.xml.in
-data/org.gnome.Example.gschema.xml
+data/com.pungpondsalami.drafting.desktop.in
+data/com.pungpondsalami.drafting.metainfo.xml.in
+data/com.pungpondsalami.drafting.gschema.xml
 src/window.ui

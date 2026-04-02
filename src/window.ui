@@ -18,76 +18,99 @@
       <object class="GtkBox">
         <property name="orientation">vertical</property>
 
-        <child>
-          <object class="AdwHeaderBar">
-            <child type="start">
-              <object class="GtkBox">
-                <property name="spacing">6</property>
-                
-                <child>
-                  <object class="GtkBox">
-                    <style><class name="linked"/></style>
-                    
-                    <child>
-                      <object class="GtkButton" id="btn_new">
-                        <property name="icon-name">tab-new-symbolic</property>
-                      </object>
-                    </child>
-                    
-                    <child>
-                      <object class="GtkButton" id="btn_save">
-                        <property name="icon-name">document-save-symbolic</property>
-                      </object>
-                    </child>
-                    
-                  </object>
-                </child>
-                
-                <child>
-                  <object class="GtkBox">
-                    <style><class name="linked"/></style>
-                    
-                    <child>
-                      <object class="GtkButton" id="btn_undo">
-                        <property name="icon-name">edit-undo-symbolic</property>
-                        <property name="tooltip-text">Undo</property>
-                      </object>
-                    </child>
-                    
-                    <child>
-                      <object class="GtkButton" id="btn_redo">
-                        <property name="icon-name">edit-redo-symbolic</property>
-                        <property name="tooltip-text">Redo</property>
-                      </object>
-                    </child>
-                    
-                  </object>
-                </child>
-              </object>
-            </child>
-
-            <child type="end">
-              <object class="GtkMenuButton">
-                <property name="icon-name">open-menu-symbolic</property>
-                <property name="menu-model">primary_menu</property>
-              </object>
-            </child>
-          </object>
-        </child>
-
+        <!-- 1. ส่วน Tab Bar (จะแสดงด้านบนสุด) -->
         <child>
           <object class="AdwTabBar" id="tab_bar">
             <property name="view">tab_view</property>
           </object>
         </child>
 
+        <!-- 2. ส่วน Overlay ที่ห่อหุ้ม Canvas และปุ่มลอยทั้งหมด -->
         <child>
           <object class="GtkOverlay">
             <property name="vexpand">true</property>
 
+            <!-- Canvas หลัก (AdwTabView) -->
             <child>
               <object class="AdwTabView" id="tab_view">
                 <property name="vexpand">true</property>
+              </object>
+            </child>
+
+            <!-- Window Controls มุมขวาบน -->
+            <child type="overlay">
+              <object class="GtkBox">
+                <property name="halign">end</property>
+                <property name="valign">start</property>
+                <property name="margin-end">12</property>
+                <property name="margin-top">8</property>
+                <style>
+                  <class name="osd"/>
+                  <class name="toolbar"/>
+                  <class name="drafting-floating"/>
+                </style>
+                <child>
+                  <!-- เพิ่ม wrapper box เพื่อควบคุมขนาดปุ่มภายใน -->
+                  <object class="GtkBox">
+                    <child type="end">
+                      <object class="GtkMenuButton">
+                        <property name="icon-name">open-menu-symbolic</property>
+                        <property name="menu-model">primary_menu</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkWindowControls">
+                        <property name="side">end</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Top Dock มุมซ้ายบน -->
+            <child type="overlay">
+              <object class="GtkBox">
+                <property name="halign">start</property>
+                <property name="valign">start</property>
+                <property name="margin-start">12</property>
+                <property name="margin-top">8</property>
+                <property name="spacing">6</property>
+                <style>
+                  <class name="osd"/>
+                  <class name="toolbar"/>
+                  <class name="drafting-floating"/>
+                </style>
+                <child>
+                  <object class="GtkBox">
+                    <style><class name="linked"/></style>
+                    <child>
+                      <object class="GtkButton" id="btn_new">
+                        <property name="icon-name">plus-large-square-outline-symbolic</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="btn_save">
+                        <property name="icon-name">arrow-pointing-at-line-down-symbolic</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox">
+                    <style><class name="linked"/></style>
+                    <child>
+                      <object class="GtkButton" id="btn_undo">
+                        <property name="icon-name">arrow-hook-left-horizontal2-symbolic</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="btn_redo">
+                        <property name="icon-name">arrow-turn-right-horizontal2-symbolic</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
               </object>
             </child>
 
@@ -99,37 +122,58 @@
                 <property name="margin-start">12</property>
                 <property name="orientation">vertical</property>
                 <property name="spacing">0</property>
-                
                 <style>
                   <class name="osd"/>
                   <class name="toolbar"/>
+                  <class name="drafting-floating"/>
                 </style>
-                
                 <child>
                   <object class="GtkButton" id="btn_line">
                     <property name="icon-name">draw-line-symbolic</property>
                     <property name="tooltip-text">Line</property>
                   </object>
                 </child>
-                
                 <child>
                   <object class="GtkButton" id="btn_circle">
                     <property name="icon-name">circle-outline-thick-symbolic</property>
                     <property name="tooltip-text">Circle</property>
                   </object>
                 </child>
-                
                 <child>
                   <object class="GtkSeparator">
                     <property name="margin-top">6</property>
                     <property name="margin-bottom">6</property>
                   </object>
                 </child>
-                
+                <child>
+                  <object class="GtkButton" id="btn_dimension">
+                    <property name="icon-name">ruler-outline-horizontal-symbolic</property>
+                    <property name="tooltip-text">Dimension</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSeparator">
+                    <property name="margin-top">6</property>
+                    <property name="margin-bottom">6</property>
+                  </object>
+                </child>
                 <child>
                   <object class="GtkToggleButton" id="btn_snap">
                     <property name="icon-name">magnet-symbolic</property>
                     <property name="tooltip-text">Snap</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSeparator">
+                    <property name="margin-top">6</property>
+                    <property name="margin-bottom">6</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="btn_auto_pan">
+                    <property name="icon-name">four-arrows-pointing-outward-symbolic</property>
+                    <property name="tooltip-text">Auto-pan at window edges</property>
+                    <property name="active">true</property>
                   </object>
                 </child>
               </object>
@@ -145,6 +189,7 @@
                 <style>
                   <class name="osd"/>
                   <class name="toolbar"/>
+                  <class name="drafting-floating"/>
                 </style>
                 <child>
                   <object class="GtkLabel">
@@ -170,8 +215,6 @@
                 <property name="vhomogeneous">false</property>
                 <property name="transition-type">crossfade</property>
                 <property name="transition-duration">150</property>
-
-                <!-- หน้าปกติ: แค่ปุ่ม Array -->
                 <child>
                   <object class="GtkStackPage">
                     <property name="name">default</property>
@@ -182,10 +225,11 @@
                         <style>
                           <class name="osd"/>
                           <class name="toolbar"/>
+                          <class name="drafting-floating"/>
                         </style>
                         <child>
                           <object class="GtkButton" id="btn_array">
-                            <property name="icon-name">view-grid-symbolic</property>
+                            <property name="icon-name">grid-filled-symbolic</property>
                             <property name="tooltip-text">Array</property>
                           </object>
                         </child>
@@ -193,8 +237,6 @@
                     </property>
                   </object>
                 </child>
-
-                <!-- หน้า Array Settings -->
                 <child>
                   <object class="GtkStackPage">
                     <property name="name">array_settings</property>
@@ -215,14 +257,13 @@
                             <style>
                               <class name="osd"/>
                               <class name="toolbar"/>
+                              <class name="drafting-floating"/>
                             </style>
-
                             <child>
                               <object class="GtkLabel">
                                 <property name="label">Rectangular Array</property>
                               </object>
                             </child>
-
                             <child>
                               <object class="GtkGrid">
                                 <property name="column-spacing">10</property>
@@ -271,11 +312,9 @@
                                 </child>
                               </object>
                             </child>
-
                             <child>
                               <object class="GtkSeparator"/>
                             </child>
-
                             <child>
                               <object class="GtkGrid">
                                 <property name="column-spacing">10</property>
@@ -320,7 +359,6 @@
                                 </child>
                               </object>
                             </child>
-
                             <child>
                               <object class="GtkBox">
                                 <property name="orientation">horizontal</property>
@@ -329,7 +367,10 @@
                                   <object class="GtkButton" id="btn_apply_array">
                                     <property name="label">Apply Array</property>
                                     <property name="hexpand">true</property>
-                                    <style><class name="suggested-action"/></style>
+                                    <style>
+                                      <class name="suggested-action"/>
+                                      <class name="drafting-apply-array"/>
+                                    </style>
                                   </object>
                                 </child>
                                 <child>
@@ -340,14 +381,12 @@
                                 </child>
                               </object>
                             </child>
-
                           </object>
                         </child>
                       </object>
                     </property>
                   </object>
                 </child>
-
               </object>
             </child>
 

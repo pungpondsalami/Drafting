@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=drafting
 Exec=drafting
-Icon=org.gnome.Example
+Icon=com.pungpondsalami.drafting
 Terminal=false
 Type=Application
 Categories=Utility;
