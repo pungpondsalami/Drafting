@@ -51,40 +51,6 @@ jobs:
           echo "PATH=$gtk\bin;$env:PATH"             >> $env:GITHUB_ENV
           echo "LIB=$gtk\lib"                        >> $env:GITHUB_ENV
           echo "GTK_ROOT=$gtk"                       >> $env:GITHUB_ENV
-          echo "GETTEXT_DIR=$gtk"                    >> $env:GITHUB_ENV
-          echo "GETTEXT_BIN_DIR=$gtk\bin"            >> $env:GITHUB_ENV
-          echo "GETTEXT_LIB_DIR=$gtk\lib"            >> $env:GITHUB_ENV
-          echo "GETTEXT_INCLUDE_DIR=$gtk\include"    >> $env:GITHUB_ENV
-          echo "X86_64_PC_WINDOWS_MSVC_GETTEXT_DIR=$gtk"                    >> $env:GITHUB_ENV
-          echo "X86_64_PC_WINDOWS_MSVC_GETTEXT_LIB_DIR=$gtk\lib"            >> $env:GITHUB_ENV
-          echo "X86_64_PC_WINDOWS_MSVC_GETTEXT_INCLUDE_DIR=$gtk\include"    >> $env:GITHUB_ENV
-
-      - name: Find gettext lib
-        run: |
-          $gtk = "C:\gtk-build\gtk\x64\release"
-          # gettext-sys หา intl.lib ไม่เจอ ต้อง copy ให้มันเจอ
-          $lib = Get-ChildItem -Path $gtk -Recurse -Filter "intl.lib" | Select-Object -First 1
-          if ($lib) {
-            Write-Host "Found: $($lib.FullName)"
-          } else {
-            Write-Host "intl.lib not found, listing libs:"
-            Get-ChildItem "$gtk\lib" -Filter "*.lib" | Select-Object Name
-          }
-
-      - name: Symlink intl.lib for gettext-sys
-        run: |
-          $gtk = "C:\gtk-build\gtk\x64\release\lib"
-          # gettext-sys หา intl.lib — gvsbuild อาจตั้งชื่อต่างออกไป
-          Get-ChildItem $gtk -Filter "*.lib" | Select-Object Name
-          # ถ้ามี libintl.lib ให้ copy เป็น intl.lib
-          if (Test-Path "$gtk\libintl.lib") {
-            Copy-Item "$gtk\libintl.lib" "$gtk\intl.lib"
-            Write-Host "Copied libintl.lib -> intl.lib"
-          } elseif (Test-Path "$gtk\intl.lib") {
-            Write-Host "intl.lib already exists"
-          } else {
-            Write-Host "Neither intl.lib nor libintl.lib found!"
-          }
 
       - name: Build Drafting
         run: cargo build --release --target x86_64-pc-windows-msvc
@@ -102,13 +68,9 @@ jobs:
           $dst = "dist\drafting"
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
 
-          # Binary
           Copy-Item "target\x86_64-pc-windows-msvc\release\drafting.exe" $dst\
-
-          # GResource
           Copy-Item "src\drafting.gresource" $dst\
 
-          # GLib schemas
           New-Item -ItemType Directory -Force -Path "$dst\share\glib-2.0\schemas" | Out-Null
           Copy-Item "data\com.pungpondsalami.drafting.gschema.xml" "$dst\share\glib-2.0\schemas\"
 
@@ -161,14 +123,12 @@ jobs:
             }
           }
 
-          # Hicolor icons (ต้องมีไม่งั้น GTK หา icon ไม่เจอ)
           New-Item -ItemType Directory -Force -Path "$dst\share\icons" | Out-Null
           $hicolor = "C:\gtk-build\gtk\x64\release\share\icons\hicolor"
           if (Test-Path $hicolor) {
             Copy-Item $hicolor "$dst\share\icons\hicolor" -Recurse
           }
 
-          # App icon เข้าไปด้วย
           New-Item -ItemType Directory -Force -Path "$dst\share\icons\hicolor\512x512\apps" | Out-Null
           Copy-Item "data\icons\hicolor\512x512\apps\com.pungpondsalami.drafting.png" `
                     "$dst\share\icons\hicolor\512x512\apps\"
@@ -242,7 +202,6 @@ jobs:
 
       - name: Find and run MakeAppx
         run: |
-          # หา makeappx.exe แบบ dynamic ไม่ hardcode version
           $makeappx = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" `
                         -Recurse -Filter "makeappx.exe" |
                       Where-Object { $_.FullName -match "x64" } |
