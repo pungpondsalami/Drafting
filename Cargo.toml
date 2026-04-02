@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gettext-rs = { version = "0.7", features = ["gettext-system"] }
+gettext-rs = { version = "0.7" }
 gtk = { version = "0.11", package = "gtk4", features = ["gnome_49"] }
 dxf = "0.6.0"
 pangocairo = "0.22"
