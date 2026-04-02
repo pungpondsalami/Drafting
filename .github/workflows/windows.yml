@@ -46,6 +46,10 @@ jobs:
           echo "PATH=$gtk\bin;$env:PATH"             >> $env:GITHUB_ENV
           echo "LIB=$gtk\lib"                        >> $env:GITHUB_ENV
           echo "GTK_ROOT=$gtk"                       >> $env:GITHUB_ENV
+          echo "GETTEXT_DIR=$gtk"                    >> $env:GITHUB_ENV
+          echo "GETTEXT_BIN_DIR=$gtk\bin"            >> $env:GITHUB_ENV
+          echo "GETTEXT_LIB_DIR=$gtk\lib"            >> $env:GITHUB_ENV
+          echo "GETTEXT_INCLUDE_DIR=$gtk\include"    >> $env:GITHUB_ENV
 
       - name: Build Drafting
         run: cargo build --release --target x86_64-pc-windows-msvc
