@@ -126,6 +126,7 @@ mod imp {
             self.snap_enabled.set(true);
             self.btn_snap.set_active(true);
             self.current_mode.set(DrawingMode::Select);
+            self.auto_pan_enabled.set(true);
 
             // สร้าง Controller สำหรับดักคีย์บอร์ดระดับ Window
             let key_ctrl = gtk::EventControllerKey::new();

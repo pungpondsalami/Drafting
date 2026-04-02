@@ -155,7 +155,6 @@ impl DraftingApplication {
         // 1. ใช้ if let แทน unwrap เพื่อความปลอดภัย
         let window = self.active_window();
 
-        // 2. สร้าง Dialog แบบไม่ต้องใส่ไอคอนแอป (ป้องกันหาไฟล์ไม่เจอแล้วเด้ง)
         let about = adw::AboutDialog::builder()
             .application_name("Drafting")
             .developer_name("Supakit Suptorranee")
