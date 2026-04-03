@@ -87,6 +87,16 @@ jobs:
           Copy-Item "C:\gtk-build\gtk\x64\release\share\glib-2.0\schemas\*" `
                     "$dst\share\glib-2.0\schemas\"
 
+      - name: Debug Cantarell
+        run: |
+          if (Test-Path "cantarell-fonts-0.303") {
+            Write-Host "Extracted OK"
+            Get-ChildItem "cantarell-fonts-0.303\prebuilt\" 
+          } else {
+            Write-Host "Extract FAILED"
+            Get-ChildItem "." 
+          }
+
       - name: Compile GLib schemas
         run: |
           $gtk = "C:\gtk-build\gtk\x64\release"
