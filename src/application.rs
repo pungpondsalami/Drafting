@@ -106,6 +106,11 @@ mod imp {
                 .toolbar windowcontrols {
                     padding: 4px;
                 }
+
+                /* Font config สำหรับ Windows ให้เหมือน GNOME */
+                * {
+                -gtk-icon-style: regular;
+                }
             "#);
             gtk::style_context_add_provider_for_display(
                 &gtk::gdk::Display::default().unwrap(),

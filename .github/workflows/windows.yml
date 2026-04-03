@@ -75,6 +75,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$dst\share\glib-2.0\schemas" | Out-Null
           Copy-Item "data\com.pungpondsalami.drafting.gschema.xml" "$dst\share\glib-2.0\schemas\"
 
+          Copy-Item "data\fonts.conf" $dst\
+
       - name: Compile GLib schemas
         run: |
           $gtk = "C:\gtk-build\gtk\x64\release"

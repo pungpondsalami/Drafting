@@ -32,6 +32,20 @@ use gtk::prelude::*;
 
 fn main() -> glib::ExitCode {
 
+    #[cfg(windows)]
+    {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    
+        if let Some(dir) = exe_dir {
+            let fonts_conf = dir.join("fonts.conf");
+            if fonts_conf.exists() {
+                std::env::set_var("FONTCONFIG_FILE", fonts_conf);
+            }
+        }
+    }
+
     // Load resources
     let res_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/drafting.gresource"));
     let resource = gio::Resource::from_data(&glib::Bytes::from(&res_bytes[..]))
