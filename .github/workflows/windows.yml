@@ -92,7 +92,7 @@ jobs:
 
           $dlls = @(
             "gtk-4-1.dll",
-            "adwaita-1.dll",
+            "adwaita-1-0.dll",
             "glib-2.0-0.dll",
             "gobject-2.0-0.dll",
             "gthread-2.0-0.dll",
@@ -114,12 +114,12 @@ jobs:
             "zlib1.dll",
             "freetype-6.dll",
             "fontconfig-1.dll",
-            "expat-2.dll",
+            "libexpat.dll",
             "pixman-1-0.dll",
             "intl.dll",
             "pcre2-8-0.dll",
             "adwaita-1-0.dll",
-            "libffi-8.dll",
+            "ffi-8.dll",
             "harfbuzz-subset.dll",
             "tiff.dll"
           )
