@@ -215,6 +215,42 @@ jobs:
           Write-Host "Using: $makeappx"
           & $makeappx pack /d msix /p drafting.msix /nv
 
+      - name: Create self-signed certificate
+        run: |
+          $cert = New-SelfSignedCertificate `
+            -Type Custom `
+            -Subject "CN=Drafting" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "Drafting Self-Signed" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          
+          $thumbprint = $cert.Thumbprint
+          echo "CERT_THUMBPRINT=$thumbprint" >> $env:GITHUB_ENV
+          
+          # Export cert สำหรับให้ผู้ใช้ไป trust
+          Export-Certificate -Cert $cert -FilePath drafting-cert.cer
+
+      - name: Sign MSIX
+        run: |
+          $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" `
+                        -Recurse -Filter "signtool.exe" |
+                      Where-Object { $_.FullName -match "x64" } |
+                      Select-Object -First 1 -ExpandProperty FullName
+          
+          & $signtool sign `
+            /sha1 $env:CERT_THUMBPRINT `
+            /fd SHA256 `
+            /tr http://timestamp.digicert.com `
+            /td SHA256 `
+            drafting.msix
+
+      - name: Upload cert for users
+        uses: actions/upload-artifact@v4
+        with:
+          name: drafting-certificate
+          path: drafting-cert.cer
+
       - name: Upload MSIX artifact
         uses: actions/upload-artifact@v4
         with:
