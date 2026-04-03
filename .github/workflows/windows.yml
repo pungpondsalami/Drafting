@@ -75,6 +75,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$dst\share\glib-2.0\schemas" | Out-Null
           Copy-Item "data\com.pungpondsalami.drafting.gschema.xml" "$dst\share\glib-2.0\schemas\"
 
+          # Bundle Cantarell font
+          New-Item -ItemType Directory -Force -Path "$dst\share\fonts\cantarell" | Out-Null
+          Invoke-WebRequest -Uri "https://download.gnome.org/sources/cantarell-fonts/0.303/cantarell-fonts-0.303.tar.xz" `
+                            -OutFile "cantarell.tar.xz"
+          tar -xf cantarell.tar.xz
+          Copy-Item "cantarell-fonts-0.303\prebuilt\*.otf" "$dst\share\fonts\cantarell\"
+
           Copy-Item "data\fonts.conf" $dst\
 
           Copy-Item "C:\gtk-build\gtk\x64\release\share\glib-2.0\schemas\*" `
@@ -84,11 +91,6 @@ jobs:
         run: |
           $gtk = "C:\gtk-build\gtk\x64\release"
           & "$gtk\bin\glib-compile-schemas.exe" "dist\drafting\share\glib-2.0\schemas\"
-
-      - name: List available DLLs
-        run: |
-          Get-ChildItem "C:\gtk-build\gtk\x64\release\bin" -Filter "*.dll" | 
-          Select-Object Name | Sort-Object Name
 
       - name: Collect GTK DLLs
         run: |
@@ -123,7 +125,6 @@ jobs:
             "pixman-1-0.dll",
             "intl.dll",
             "pcre2-8-0.dll",
-            "adwaita-1-0.dll",
             "ffi-8.dll",
             "harfbuzz-subset.dll",
             "tiff.dll",

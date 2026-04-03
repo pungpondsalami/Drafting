@@ -107,9 +107,23 @@ mod imp {
                     padding: 4px;
                 }
 
-                /* Font config สำหรับ Windows ให้เหมือน GNOME */
-                * {
-                -gtk-icon-style: regular;
+                /* Button press animation */
+                button {
+                    transition: transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1),
+                                opacity 150ms ease;
+                }
+
+                button:active {
+                    transform: scale(0.88);
+                    opacity: 0.85;
+                }
+
+                button image {
+                    transition: transform 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
+                }
+
+                button:active image {
+                    transform: scale(0.88);
                 }
             "#);
             gtk::style_context_add_provider_for_display(
