@@ -80,6 +80,11 @@ jobs:
           $gtk = "C:\gtk-build\gtk\x64\release"
           & "$gtk\bin\glib-compile-schemas.exe" "dist\drafting\share\glib-2.0\schemas\"
 
+      - name: List available DLLs
+        run: |
+          Get-ChildItem "C:\gtk-build\gtk\x64\release\bin" -Filter "*.dll" | 
+          Select-Object Name | Sort-Object Name
+
       - name: Collect GTK DLLs
         run: |
           $gtk_bin = "C:\gtk-build\gtk\x64\release\bin"
