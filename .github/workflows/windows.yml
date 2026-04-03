@@ -77,9 +77,9 @@ jobs:
 
           # Bundle Cantarell font จาก GitHub
           New-Item -ItemType Directory -Force -Path "$dst\share\fonts\cantarell" | Out-Null
-          Invoke-WebRequest -Uri "https://github.com/GNOME/cantarell-fonts/raw/master/prebuilt/Cantarell-VF.otf" `
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/GNOME/cantarell-fonts/master/prebuilt/Cantarell-VF.otf" `
                             -OutFile "$dst\share\fonts\cantarell\Cantarell-VF.otf"
-                            
+
           Copy-Item "data\fonts.conf" $dst\
 
           Copy-Item "C:\gtk-build\gtk\x64\release\share\glib-2.0\schemas\*" `
