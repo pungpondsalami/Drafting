@@ -116,7 +116,7 @@ jobs:
             "adwaita-1-0.dll",
             "libffi-8.dll",
             "harfbuzz-subset.dll",
-            "tiff.dll",
+            "tiff.dll"
           )
 
           foreach ($dll in $dlls) {
