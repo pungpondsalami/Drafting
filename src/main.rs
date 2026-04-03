@@ -41,7 +41,9 @@ fn main() -> glib::ExitCode {
         if let Some(dir) = exe_dir {
             let fonts_conf = dir.join("fonts.conf");
             if fonts_conf.exists() {
-                std::env::set_var("FONTCONFIG_FILE", fonts_conf);
+                unsafe {
+                    std::env::set_var("FONTCONFIG_FILE", fonts_conf);
+                }
             }
         }
     }
