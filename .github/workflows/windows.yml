@@ -75,12 +75,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$dst\share\glib-2.0\schemas" | Out-Null
           Copy-Item "data\com.pungpondsalami.drafting.gschema.xml" "$dst\share\glib-2.0\schemas\"
 
-          # Bundle Cantarell font
+          # Bundle Cantarell font จาก Google Fonts
           New-Item -ItemType Directory -Force -Path "$dst\share\fonts\cantarell" | Out-Null
-          Invoke-WebRequest -Uri "https://download.gnome.org/sources/cantarell-fonts/0.303/cantarell-fonts-0.303.tar.xz" `
-                            -OutFile "cantarell.tar.xz"
-          tar -xf cantarell.tar.xz
-          Copy-Item "cantarell-fonts-0.303\prebuilt\*.otf" "$dst\share\fonts\cantarell\"
+          Invoke-WebRequest -Uri "https://fonts.google.com/download?family=Cantarell" `
+                            -OutFile "cantarell.zip"
+          Expand-Archive -Path "cantarell.zip" -DestinationPath "cantarell-extracted"
+          Copy-Item "cantarell-extracted\*.ttf" "$dst\share\fonts\cantarell\"
 
           Copy-Item "data\fonts.conf" $dst\
 
