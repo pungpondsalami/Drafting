@@ -113,6 +113,10 @@ jobs:
             "pixman-1-0.dll",
             "intl.dll",
             "pcre2-8-0.dll"
+            "adwaita-1-0.dll",
+            "libffi-8.dll",
+            "harfbuzz-subset.dll",
+            "tiff.dll",
           )
 
           foreach ($dll in $dlls) {
