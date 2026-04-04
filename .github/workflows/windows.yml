@@ -153,9 +153,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "msix\Assets" | Out-Null
           $src = "data\icons\hicolor\512x512\apps\com.pungpondsalami.drafting.png"
-          magick $src -resize 44x44   msix\Assets\Square44x44Logo.png
-          magick $src -resize 150x150 msix\Assets\Square150x150Logo.png
-          magick $src -resize 50x50   msix\Assets\StoreLogo.png
+          magick $src -resize 71x71   msix\Assets\Square71x71Logo.png
+          magick $src -resize 310x310 msix\Assets\Square310x310Logo.png
+          magick $src -resize 310x150 msix\Assets\Wide310x150Logo.png
+          magick $src -resize 44x44   msix\Assets\Square44x44Logo.scale-100.png
+          magick $src -resize 88x88   msix\Assets\Square44x44Logo.scale-200.png
 
       - name: Create MSIX structure
         run: |
@@ -204,7 +206,12 @@ jobs:
                   Description="A 2D CAD application"
                   BackgroundColor="transparent"
                   Square150x150Logo="Assets\Square150x150Logo.png"
-                  Square44x44Logo="Assets\Square44x44Logo.png"/>
+                  Square44x44Logo="Assets\Square44x44Logo.png">
+                  <uap:DefaultTile
+                    Square71x71Logo="Assets\Square71x71Logo.png"
+                    Square310x310Logo="Assets\Square310x310Logo.png"
+                    Wide310x150Logo="Assets\Wide310x150Logo.png"/>
+                </uap:VisualElements>
               </Application>
             </Applications>
 
