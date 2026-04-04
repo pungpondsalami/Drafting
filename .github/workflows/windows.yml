@@ -145,9 +145,9 @@ jobs:
             Copy-Item $hicolor "$dst\share\icons\hicolor" -Recurse
           }
 
-          New-Item -ItemType Directory -Force -Path "$dst\share\icons\hicolor\512x512\apps" | Out-Null
-          Copy-Item "data\icons\hicolor\512x512\apps\com.pungpondsalami.drafting.png" `
-                    "$dst\share\icons\hicolor\512x512\apps\"
+          New-Item -ItemType Directory -Force -Path "$dst\share\icons\hicolor\scalable\apps" | Out-Null
+          Copy-Item "data\icons\hicolor\scalable\apps\com.pungpondsalami.drafting.svg" `
+                    "$dst\share\icons\hicolor\scalable\apps\"
 
       - name: Prepare MSIX assets
         run: |
