@@ -75,10 +75,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$dst\share\glib-2.0\schemas" | Out-Null
           Copy-Item "data\com.pungpondsalami.drafting.gschema.xml" "$dst\share\glib-2.0\schemas\"
 
-          # Bundle Cantarell font จาก GitHub
+          # Bundle Cantarell font จาก repo
           New-Item -ItemType Directory -Force -Path "$dst\share\fonts\cantarell" | Out-Null
-          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/GNOME/cantarell-fonts/master/prebuilt/Cantarell-VF.otf" `
-                            -OutFile "$dst\share\fonts\cantarell\Cantarell-VF.otf"
+          Copy-Item "data\fonts\Cantarell-VF.otf" "$dst\share\fonts\cantarell\"
 
           Copy-Item "data\fonts.conf" $dst\
 
