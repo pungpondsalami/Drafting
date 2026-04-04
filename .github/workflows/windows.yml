@@ -152,7 +152,7 @@ jobs:
       - name: Prepare MSIX assets
         run: |
           New-Item -ItemType Directory -Force -Path "msix\Assets" | Out-Null
-          $src = "data\icons\hicolor\512x512\apps\com.pungpondsalami.drafting.png"
+          $src = "data\icons\hicolor\scalable\apps\com.pungpondsalami.drafting.svg"
           magick $src -resize 44x44   msix\Assets\Square44x44Logo.png
           magick $src -resize 150x150 msix\Assets\Square150x150Logo.png
           magick $src -resize 50x50   msix\Assets\StoreLogo.png
