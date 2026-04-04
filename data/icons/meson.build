@@ -1,8 +1,8 @@
 application_id = 'com.pungpondsalami.drafting'
 
 install_data(
-  'hicolor/512x512/apps/com.pungpondsalami.drafting.png',
-  install_dir: get_option('datadir') / 'icons/hicolor/512x512/apps',
+  'hicolor/scalable/apps/com.pungpondsalami.drafting.svg',
+  install_dir: get_option('datadir') / 'icons/hicolor/scalable/apps',
 )
 
 install_data(
