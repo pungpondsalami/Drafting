@@ -1,3 +1,5 @@
+![Drafting Screenshot](docs/Drafting-logo.png)
+
 # Drafting
 
 A simple 2D CAD application for Linux, built with GTK4 and libadwaita.
