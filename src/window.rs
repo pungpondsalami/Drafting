@@ -1300,7 +1300,7 @@ impl DraftingWindow {
         let padding = 10.0;
 
         cr.set_source_rgb(1.0, 1.0, 0.0);
-        cr.move_to(10.0 + padding, 70.0 + padding);
+        cr.move_to(190.0 + padding, 15.0 + padding);
         let _ = pangocairo::functions::show_layout(cr, &layout);
     }
 

@@ -140,33 +140,15 @@
                   </object>
                 </child>
                 <child>
-                  <object class="GtkSeparator">
-                    <property name="margin-top">6</property>
-                    <property name="margin-bottom">6</property>
-                  </object>
-                </child>
-                <child>
                   <object class="GtkButton" id="btn_dimension">
                     <property name="icon-name">ruler-outline-horizontal-symbolic</property>
                     <property name="tooltip-text">Dimension</property>
                   </object>
                 </child>
                 <child>
-                  <object class="GtkSeparator">
-                    <property name="margin-top">6</property>
-                    <property name="margin-bottom">6</property>
-                  </object>
-                </child>
-                <child>
                   <object class="GtkToggleButton" id="btn_snap">
                     <property name="icon-name">magnet-symbolic</property>
                     <property name="tooltip-text">Snap</property>
-                  </object>
-                </child>
-                <child>
-                  <object class="GtkSeparator">
-                    <property name="margin-top">6</property>
-                    <property name="margin-bottom">6</property>
                   </object>
                 </child>
                 <child>
