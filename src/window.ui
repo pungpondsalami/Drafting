@@ -12,7 +12,7 @@
   <template class="DraftingWindow" parent="AdwApplicationWindow">
     <property name="default-width">1000</property>
     <property name="default-height">700</property>
-    <property name="title">Drafting (pre-alpha)</property>
+    <property name="title">Drafting</property>
 
     <property name="content">
       <object class="GtkBox">
@@ -58,6 +58,27 @@
                         <property name="menu-model">primary_menu</property>
                       </object>
                     </child>
+                    <!-- Drag handle กลางขอบบน -->
+                    <child type="overlay">
+                      <object class="GtkWindowHandle">
+                      <property name="halign">center</property>
+                      <property name="valign">start</property>
+                      <style><class name="drafting-handle"/></style>
+                        <child>
+                          <object class="GtkBox">
+                          <property name="margin-top">8</property>
+                          <property name="margin-bottom">10</property>
+                          <property name="margin-start">24</property>
+                          <property name="margin-end">24</property>
+                            <child>
+                              <object class="GtkBox">
+                              <style><class name="drafting-grip"/></style>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
                     <child>
                       <object class="GtkWindowControls">
                         <property name="side">end</property>
@@ -87,6 +108,12 @@
                     <child>
                       <object class="GtkButton" id="btn_new">
                         <property name="icon-name">plus-large-square-outline-symbolic</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="btn_open">
+                        <property name="icon-name">document-open-symbolic</property>
+                        <property name="tooltip-text">Open (Ctrl+O)</property>
                       </object>
                     </child>
                     <child>
@@ -135,8 +162,20 @@
                 </child>
                 <child>
                   <object class="GtkButton" id="btn_circle">
-                    <property name="icon-name">circle-outline-thick-symbolic</property>
+                    <property name="icon-name">draw-circle-symbolic</property>
                     <property name="tooltip-text">Circle</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="btn_arc">
+                    <property name="icon-name">draw-arc-symbolic</property>
+                    <property name="tooltip-text">Arc (3-point)</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="btn_polyline">
+                    <property name="icon-name">draw-polyline-symbolic</property>
+                    <property name="tooltip-text">Polyline (Enter to finish)</property>
                   </object>
                 </child>
                 <child>
@@ -146,9 +185,22 @@
                   </object>
                 </child>
                 <child>
-                  <object class="GtkToggleButton" id="btn_snap">
-                    <property name="icon-name">magnet-symbolic</property>
-                    <property name="tooltip-text">Snap</property>
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <style><class name="linked"/></style>
+                    <child>
+                      <object class="GtkToggleButton" id="btn_snap">
+                        <property name="icon-name">magnet-symbolic</property>
+                        <property name="tooltip-text">Snap (F9)</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkToggleButton" id="btn_snap_menu">
+                        <property name="icon-name">pan-end-symbolic</property>
+                        <property name="tooltip-text">Object snap settings</property>
+                        <style><class name="drafting-expander"/></style>
+                    </object>
+                    </child>
                   </object>
                 </child>
                 <child>
@@ -156,6 +208,68 @@
                     <property name="icon-name">four-arrows-pointing-outward-symbolic</property>
                     <property name="tooltip-text">Auto-pan at window edges</property>
                     <property name="active">true</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- Snap Settings Dock -->
+            <child type="overlay">
+              <object class="GtkRevealer">
+                <property name="halign">start</property>
+                <property name="valign">center</property>
+                <property name="margin-start">72</property>
+                <property name="transition-type">slide-right</property>
+                <property name="transition-duration">250</property>
+                <property name="reveal-child" bind-source="btn_snap_menu" bind-property="active" bind-flags="sync-create"/>
+                <child>
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">6</property>
+                    <style>
+                      <class name="osd"/>
+                      <class name="toolbar"/>
+                      <class name="drafting-floating"/>
+                    </style>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">Object Snap</property>
+                        <property name="halign">center</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSeparator"/>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="chk_snap_endpoint">
+                        <property name="label">Endpoint</property>
+                        <property name="active">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="chk_snap_midpoint">
+                        <property name="label">Midpoint</property>
+                        <property name="active">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="chk_snap_center">
+                        <property name="label">Center</property>
+                        <property name="active">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="chk_snap_quadrant">
+                        <property name="label">Quadrant</property>
+                        <property name="active">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="chk_snap_intersection">
+                        <property name="label">Intersection</property>
+                        <property name="active">true</property>
+                      </object>
+                    </child>
                   </object>
                 </child>
               </object>

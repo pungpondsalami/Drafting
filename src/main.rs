@@ -23,6 +23,7 @@ mod config;
 mod window;
 mod engine;
 mod spatial;
+mod renderer;
 
 use self::application::DraftingApplication;
 use self::window::DraftingWindow;

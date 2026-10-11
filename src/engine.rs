@@ -2,9 +2,9 @@
 
 use crate::spatial::BoundingBox;
 use crate::spatial::SpatialIndex;
+use std::path::PathBuf;
+use std::f64::consts::{FRAC_PI_2, TAU};
 
-#[allow(dead_code)]
-pub const ZOOM_STEPS: [f64; 10] = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0];
 pub const DEFAULT_DIMENSION_OFFSET: f64 = 30.0;
 
 #[derive(Debug, Clone)]
@@ -55,6 +55,62 @@ pub enum ToolMode {
     Array,
     Move,
     Dimension,
+    Arc,
+    Polyline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SnapKind {
+    Endpoint,
+    Midpoint,
+    Center,
+    Quadrant,
+    Intersection,
+}
+
+impl SnapKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SnapKind::Endpoint => "ENDPOINT",
+            SnapKind::Midpoint => "MIDPOINT",
+            SnapKind::Center => "CENTER",
+            SnapKind::Quadrant => "QUADRANT",
+            SnapKind::Intersection => "INTERSECTION",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SnapSettings {
+    pub endpoint: bool,
+    pub midpoint: bool,
+    pub center: bool,
+    pub quadrant: bool,
+    pub intersection: bool,
+}
+
+impl Default for SnapSettings {
+    fn default() -> Self {
+        Self {
+            endpoint: true,
+            midpoint: true,
+            center: true,
+            quadrant: true,
+            intersection: true,
+        }
+    }
+}
+
+impl SnapSettings {
+    pub fn allows(&self, kind: SnapKind) -> bool {
+        match kind {
+            SnapKind::Endpoint => self.endpoint,
+            SnapKind::Midpoint => self.midpoint,
+            SnapKind::Center => self.center,
+            SnapKind::Quadrant => self.quadrant,
+            SnapKind::Intersection => self.intersection,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -93,19 +149,45 @@ pub struct DrawingElement {
 
 #[derive(Debug, Clone)]
 pub enum ElementData {
-    Line {
-        start: Point,
-        end: Point,
-    },
-    Circle {
-        center: Point,
-        radius: f64,
-    },
-    Dimension {
-        start: Point,
-        end: Point,
-        offset: f64,
-    },
+    Line { start: Point, end: Point },
+    Circle { center: Point, radius: f64 },
+    Dimension { start: Point, end: Point, offset: f64 },
+    /// มุมเป็นเรเดียน หมุนทวนเข็ม (CCW) จาก start ไป end และ end > start เสมอ
+    Arc { center: Point, radius: f64, start_angle: f64, end_angle: f64 },
+    Polyline { points: Vec<Point>, closed: bool },
+}
+
+impl ElementData {
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        match self {
+            ElementData::Line { start, end } | ElementData::Dimension { start, end, .. } => {
+                start.x += dx;
+                start.y += dy;
+                end.x += dx;
+                end.y += dy;
+            }
+            ElementData::Circle { center, .. } | ElementData::Arc { center, .. } => {
+                center.x += dx;
+                center.y += dy;
+            }
+            ElementData::Polyline { points, .. } => {
+                for p in points {
+                    p.x += dx;
+                    p.y += dy;
+                }
+            }
+        }
+    }
+
+    pub fn ref_point(&self) -> Point {
+        match self {
+            ElementData::Line { start, .. } | ElementData::Dimension { start, .. } => *start,
+            ElementData::Circle { center, .. } | ElementData::Arc { center, .. } => *center,
+            ElementData::Polyline { points, .. } => {
+                points.first().copied().unwrap_or(Point { x: 0.0, y: 0.0 })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -155,6 +237,19 @@ pub enum RenderCommand {
         ext1_x1: f64, ext1_y1: f64, ext1_x2: f64, ext1_y2: f64,
         ext2_x1: f64, ext2_y1: f64, ext2_x2: f64, ext2_y2: f64,
     },
+    Arc {
+        cx: f64,
+        cy: f64,
+        radius: f64,
+        start_angle: f64,
+        end_angle: f64,
+        is_selected: bool,
+    },
+    Polyline {
+        points: Vec<(f64, f64)>,
+        closed: bool,
+        is_selected: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -202,6 +297,24 @@ impl DrawingElement {
                     BoundingBox::from_points(start.x, start.y, end.x, end.y)
                 }
             }
+            ElementData::Arc { center, radius, start_angle, end_angle } => {
+                arc_bounds(*center, *radius, *start_angle, *end_angle)
+            }
+            ElementData::Polyline { points, .. } => {
+                let mut b = BoundingBox {
+                    min_x: f64::MAX,
+                    min_y: f64::MAX,
+                    max_x: f64::MIN,
+                    max_y: f64::MIN,
+                };
+                for p in points {
+                    b.min_x = b.min_x.min(p.x);
+                    b.min_y = b.min_y.min(p.y);
+                    b.max_x = b.max_x.max(p.x);
+                    b.max_y = b.max_y.max(p.y);
+                }
+                b
+            }
         }
     }
 
@@ -209,25 +322,7 @@ impl DrawingElement {
         let mut new_el = self.clone();
         new_el.id = id;
         new_el.is_selected = false; // ตัวก๊อปปี้ไม่ต้องติดสถานะเลือก
-
-        match &mut new_el.data {
-            ElementData::Line { start, end } => {
-                start.x += dx;
-                start.y += dy;
-                end.x += dx;
-                end.y += dy;
-            }
-            ElementData::Circle { center, .. } => {
-                center.x += dx;
-                center.y += dy;
-            }
-            ElementData::Dimension { start, end, .. } => {
-                start.x += dx;
-                start.y += dy;
-                end.x += dx;
-                end.y += dy;
-            }
-        }
+        new_el.data.translate(dx, dy);
         new_el
     }
 }
@@ -351,7 +446,7 @@ impl Camera {
 
 #[derive(Debug)]
 pub struct Engine {
-    pub spatial_index: SpatialIndex<DrawingElement>,
+    pub spatial_index: SpatialIndex<u64>,
     pub history: Vec<DrawingElement>,
     pub camera: Camera,
     pub active_tool: ToolMode,
@@ -361,7 +456,10 @@ pub struct Engine {
     pub show_array_ui: bool,
     pub apply_anim: ApplyAnimation,
     pub hovered_id: Option<u64>,
-    pub move_snapshot: Option<Vec<DrawingElement>>,
+    pub undo_stack: Vec<Vec<DrawingElement>>,
+    pub redo_stack: Vec<Vec<DrawingElement>>,
+    pub file_path: Option<PathBuf>,
+    pub dirty: bool,
 }
 
 impl Engine {
@@ -377,7 +475,10 @@ impl Engine {
             show_array_ui: false,
             apply_anim: ApplyAnimation::default(),
             hovered_id: None,
-            move_snapshot: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            file_path: None,
+            dirty: false,
         }
     }
 
@@ -392,25 +493,16 @@ impl Engine {
 
         let mut hits = Vec::new();
         self.spatial_index.query(&query_box, &mut hits);
+        let top = hits.into_iter().copied().max(); // id มากสุด = วาดทีหลังสุด = อยู่บนสุด
 
-        // ถ้าไม่ได้ shift ค่อยเคลียร์
         if !add_to_selection {
             for el in &mut self.history {
                 el.is_selected = false;
             }
         }
 
-        if let Some(target) = hits.last() {
-            let target_id = target.id;
-            if let Some(el) = self.history.iter_mut().find(|e| e.id == target_id) {
-                el.is_selected = true;
-            }
-        }
-
-        self.spatial_index = SpatialIndex::new(8);
-        for el in &self.history {
-            let bounds = el.bounding_box();
-            self.spatial_index.insert(el.clone(), bounds);
+        if let Some(i) = top.and_then(|id| self.index_of(id)) {
+            self.history[i].is_selected = true;
         }
     }
 
@@ -418,76 +510,110 @@ impl Engine {
         for el in &mut self.history {
             el.is_selected = false;
         }
-        self.spatial_index = SpatialIndex::new(8);
-        for el in &self.history {
-            let bounds = el.bounding_box();
-            self.spatial_index.insert(el.clone(), bounds);
+    }
+
+    pub fn hover_at(&mut self, world_x: f64, world_y: f64) {
+        let tolerance = 5.0 / self.camera.scale;
+        let query_box = BoundingBox {
+            min_x: world_x - tolerance,
+            min_y: world_y - tolerance,
+            max_x: world_x + tolerance,
+            max_y: world_y + tolerance,
+        };
+        let mut hits = Vec::new();
+        self.spatial_index.query(&query_box, &mut hits);
+        let top = hits.into_iter().copied().max();
+        self.hovered_id = top;
+    }
+
+    pub fn select_in_box(
+        &mut self,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        crossing: bool,
+        add_to_selection: bool,
+    ) {
+        let sel_box = BoundingBox::from_points(x1, y1, x2, y2);
+
+        if !add_to_selection {
+            for el in &mut self.history {
+                el.is_selected = false;
+            }
+        }
+
+        let mut hits = Vec::new();
+        self.spatial_index.query(&sel_box, &mut hits);
+        let hit_ids: Vec<u64> = hits.into_iter().copied().collect();
+
+        for id in hit_ids {
+            let Some(i) = self.index_of(id) else { continue };
+            let el = &mut self.history[i];
+            if crossing {
+                el.is_selected = true;
+            } else {
+                let bb = el.bounding_box();
+                if bb.min_x >= sel_box.min_x
+                    && bb.max_x <= sel_box.max_x
+                    && bb.min_y >= sel_box.min_y
+                    && bb.max_y <= sel_box.max_y
+                {
+                    el.is_selected = true;
+                }
+            }
         }
     }
 
-    pub fn snapshot_for_undo(&mut self) {
-        // บันทึก state ปัจจุบันก่อน move
-        self.move_snapshot = Some(self.history.clone());
+    const MAX_UNDO: usize = 100;
+
+    fn index_of(&self, id: u64) -> Option<usize> {
+        self.history.binary_search_by_key(&id, |e| e.id).ok()
+    }
+
+    fn rebuild_index(&mut self) {
+        let mut idx = SpatialIndex::new(8);
+        for el in &self.history {
+            idx.insert(el.id, el.bounding_box());
+        }
+        self.spatial_index = idx;
+    }
+
+    /// เรียก "ก่อน" แก้ไขอะไรก็ตามที่ต้อง undo ได้ (วาด, ย้าย, array)
+    pub fn checkpoint(&mut self) {
+        self.dirty = true;
+        self.undo_stack.push(self.history.clone());
+        if self.undo_stack.len() > Self::MAX_UNDO {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear(); // มี action ใหม่ → redo เดิมใช้ไม่ได้แล้ว
     }
 
     pub fn undo_last_action(&mut self) {
-        // ถ้ามี move snapshot ให้ restore ก่อน
-        if let Some(snapshot) = self.move_snapshot.take() {
-            self.history = snapshot;
-            self.spatial_index = SpatialIndex::new(8);
-            for el in &self.history {
-                let bounds = el.bounding_box();
-                self.spatial_index.insert(el.clone(), bounds);
-            }
-            return;
+        if let Some(prev) = self.undo_stack.pop() {
+            self.dirty = true;
+            let current = std::mem::replace(&mut self.history, prev);
+            self.redo_stack.push(current);
+            self.hovered_id = None;
+            self.rebuild_index();
         }
-        // ไม่มี snapshot ค่อย pop element เหมือนเดิม
-        if self.history.pop().is_some() {
-            self.spatial_index = SpatialIndex::new(8);
-            for el in &self.history {
-                let bounds = el.bounding_box();
-                self.spatial_index.insert(el.clone(), bounds);
-            }
+    }
+
+    pub fn redo_last_action(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            self.dirty = true;
+            let current = std::mem::replace(&mut self.history, next);
+            self.undo_stack.push(current);
+            self.hovered_id = None;
+            self.rebuild_index();
         }
     }
 
     pub fn move_selected(&mut self, dx: f64, dy: f64) {
-        let selected_ids: Vec<u64> = self
-            .history
-            .iter()
-            .filter(|e| e.is_selected)
-            .map(|e| e.id)
-            .collect();
-
-        for el in &mut self.history {
-            if !selected_ids.contains(&el.id) {
-                continue;
-            }
-            match &mut el.data {
-                ElementData::Line { start, end } => {
-                    start.x += dx;
-                    start.y += dy;
-                    end.x += dx;
-                    end.y += dy;
-                }
-                ElementData::Circle { center, .. } => {
-                    center.x += dx;
-                    center.y += dy;
-                }
-                ElementData::Dimension { start, end, .. } => {
-                    start.x += dx;
-                    start.y += dy;
-                    end.x += dx;
-                    end.y += dy;
-                }
-            }
+        for el in self.history.iter_mut().filter(|e| e.is_selected) {
+            el.data.translate(dx, dy);
         }
-
-        self.spatial_index = SpatialIndex::new(8);
-        for el in &self.history {
-            let bounds = el.bounding_box();
-            self.spatial_index.insert(el.clone(), bounds);
-        }
+        self.rebuild_index();
     }
 
     pub fn move_and_snap_selected(&mut self, dx: f64, dy: f64, snap_enabled: bool) {
@@ -503,10 +629,9 @@ impl Engine {
             .history
             .iter()
             .find(|e| e.is_selected)
-            .map(|e| match &e.data {
-                ElementData::Line { start, .. } => (start.x, start.y),
-                ElementData::Circle { center, .. } => (center.x, center.y),
-                ElementData::Dimension { start, .. } => (start.x, start.y),
+            .map(|e| {
+                let p = e.data.ref_point();
+                (p.x, p.y)
             });
 
         if let Some((rx, ry)) = ref_point {
@@ -519,66 +644,6 @@ impl Engine {
             if snap_dx.abs() > 0.001 || snap_dy.abs() > 0.001 {
                 self.move_selected(snap_dx, snap_dy);
             }
-        }
-    }
-
-    pub fn hover_at(&mut self, world_x: f64, world_y: f64) {
-        let tolerance = 5.0 / self.camera.scale;
-        let query_box = BoundingBox {
-            min_x: world_x - tolerance,
-            min_y: world_y - tolerance,
-            max_x: world_x + tolerance,
-            max_y: world_y + tolerance,
-        };
-        let mut hits = Vec::new();
-        self.spatial_index.query(&query_box, &mut hits);
-        self.hovered_id = hits.last().map(|e| e.id);
-    }
-
-    pub fn select_in_box(
-        &mut self,
-        x1: f64,
-        y1: f64,
-        x2: f64,
-        y2: f64,
-        crossing: bool,
-        add_to_selection: bool,
-    ) {
-        let sel_box = BoundingBox::from_points(x1, y1, x2, y2);
-
-        // ถ้าไม่ shift ค่อยเคลียร์
-        if !add_to_selection {
-            for el in &mut self.history {
-                el.is_selected = false;
-            }
-        }
-
-        let mut hits = Vec::new();
-        self.spatial_index.query(&sel_box, &mut hits);
-        let hit_ids: Vec<u64> = hits.iter().map(|e| e.id).collect();
-
-        for el in &mut self.history {
-            if !hit_ids.contains(&el.id) {
-                continue;
-            }
-            if crossing {
-                el.is_selected = true;
-            } else {
-                let bb = el.bounding_box();
-                if bb.min_x >= sel_box.min_x
-                    && bb.max_x <= sel_box.max_x
-                    && bb.min_y >= sel_box.min_y
-                    && bb.max_y <= sel_box.max_y
-                {
-                    el.is_selected = true;
-                }
-            }
-        }
-
-        self.spatial_index = SpatialIndex::new(8);
-        for el in &self.history {
-            let bounds = el.bounding_box();
-            self.spatial_index.insert(el.clone(), bounds);
         }
     }
 
@@ -665,6 +730,32 @@ impl Engine {
                                 is_selected: true,
                             });
                         }
+                        ElementData::Arc { center, radius, start_angle, end_angle } => {
+                            let c = self
+                                .camera
+                                .world_to_screen(center.x + offset_x, center.y + offset_y);
+                            previews.push(RenderCommand::Arc {
+                                cx: c.0,
+                                cy: c.1,
+                                radius: radius * self.camera.scale * self.array_settings.anim_scale,
+                                start_angle: *start_angle,
+                                end_angle: *end_angle,
+                                is_selected: true,
+                            });
+                        }
+                        ElementData::Polyline { points, closed } => {
+                            let pts = points
+                                .iter()
+                                .map(|p| {
+                                    self.camera.world_to_screen(p.x + offset_x, p.y + offset_y)
+                                })
+                                .collect();
+                            previews.push(RenderCommand::Polyline {
+                                points: pts,
+                                closed: *closed,
+                                is_selected: true,
+                            });
+                        }
                         ElementData::Dimension { .. } => {
                             // Skip dimension in array preview for now
                         }
@@ -676,6 +767,7 @@ impl Engine {
     }
 
     pub fn apply_array_grid(&mut self, rows: i32, cols: i32, dx: f64, dy: f64) {
+        self.checkpoint();
         let mut new_elements = Vec::new();
         let selected_ids: Vec<u64> = self
             .history
@@ -729,22 +821,22 @@ impl Engine {
 
     pub fn add_element(&mut self, element: DrawingElement) {
         let bounds = element.bounding_box();
-        self.history.push(element.clone()); // เก็บประวัติไว้
-        self.spatial_index.insert(element, bounds);
+        self.spatial_index.insert(element.id, bounds);
+        self.history.push(element);
     }
 
     pub fn get_visible_elements(&self, viewport_bounds: BoundingBox) -> Vec<&DrawingElement> {
-        let mut visible = Vec::new();
-        self.spatial_index.query(&viewport_bounds, &mut visible);
-        visible
+        let mut hits = Vec::new();
+        self.spatial_index.query(&viewport_bounds, &mut hits);
+        let mut ids: Vec<u64> = hits.into_iter().copied().collect();
+        ids.sort_unstable(); // ลำดับการวาดคงที่ ไม่กะพริบ
+        ids.into_iter()
+            .filter_map(|id| self.index_of(id).map(|i| &self.history[i]))
+            .collect()
     }
 
     pub fn get_all_elements(&self) -> Vec<&DrawingElement> {
-        self.spatial_index
-            .get_all_elements()
-            .into_iter()
-            .map(|(_bounds, data)| data)
-            .collect()
+        self.history.iter().collect()
     }
 
     pub fn step(&mut self, current_time: u64) -> bool {
@@ -841,6 +933,139 @@ impl Engine {
             snap_coord(wx, step_major, step_minor),
             snap_coord(wy, step_major, step_minor),
         )
+    }
+
+    /// หาจุดสำคัญของวัตถุที่ใกล้เมาส์ที่สุด (ระยะ 12px บนจอ)
+    pub fn find_object_snap(
+        &self,
+        wx: f64,
+        wy: f64,
+        settings: &SnapSettings,
+    ) -> Option<(Point, SnapKind)> {
+        let tol = 12.0 / self.camera.scale;
+        let query_box = BoundingBox {
+            min_x: wx - tol,
+            min_y: wy - tol,
+            max_x: wx + tol,
+            max_y: wy + tol,
+        };
+        let mut hits = Vec::new();
+        self.spatial_index.query(&query_box, &mut hits);
+
+        let elems: Vec<&ElementData> = hits
+            .into_iter()
+            .copied()
+            .filter_map(|id| self.index_of(id).map(|i| &self.history[i].data))
+            .collect();
+
+        let mut best: Option<(f64, Point, SnapKind)> = None;
+        let mut consider = |p: Point, kind: SnapKind| {
+            if !settings.allows(kind) {
+                return;
+            }
+            let d = ((p.x - wx).powi(2) + (p.y - wy).powi(2)).sqrt();
+            if d > tol {
+                return;
+            }
+            // จุดสำคัญ (endpoint/center/intersection) ได้แต้มต่อเล็กน้อย
+            let bonus = match kind {
+                SnapKind::Endpoint | SnapKind::Center | SnapKind::Intersection => tol * 0.25,
+                _ => 0.0,
+            };
+            let score = d - bonus;
+            if best.map_or(true, |(s, _, _)| score < s) {
+                best = Some((score, p, kind));
+            }
+        };
+
+        for data in &elems {
+            match data {
+                ElementData::Line { start, end } => {
+                    consider(*start, SnapKind::Endpoint);
+                    consider(*end, SnapKind::Endpoint);
+                    consider(
+                        Point { x: (start.x + end.x) / 2.0, y: (start.y + end.y) / 2.0 },
+                        SnapKind::Midpoint,
+                    );
+                }
+                ElementData::Circle { center, radius } => {
+                    consider(*center, SnapKind::Center);
+                    consider(Point { x: center.x + radius, y: center.y }, SnapKind::Quadrant);
+                    consider(Point { x: center.x - radius, y: center.y }, SnapKind::Quadrant);
+                    consider(Point { x: center.x, y: center.y + radius }, SnapKind::Quadrant);
+                    consider(Point { x: center.x, y: center.y - radius }, SnapKind::Quadrant);
+                }
+                ElementData::Dimension { start, end, .. } => {
+                    consider(*start, SnapKind::Endpoint);
+                    consider(*end, SnapKind::Endpoint);
+                }
+                ElementData::Arc { center, radius, start_angle, end_angle } => {
+                    consider(*center, SnapKind::Center);
+                    consider(arc_point(*center, *radius, *start_angle), SnapKind::Endpoint);
+                    consider(arc_point(*center, *radius, *end_angle), SnapKind::Endpoint);
+                    consider(
+                        arc_point(*center, *radius, (*start_angle + *end_angle) / 2.0),
+                        SnapKind::Midpoint,
+                    );
+                    for k in 0..4 {
+                        let a = k as f64 * FRAC_PI_2;
+                        if angle_in_range(a, *start_angle, *end_angle) {
+                            consider(arc_point(*center, *radius, a), SnapKind::Quadrant);
+                        }
+                    }
+                }
+                ElementData::Polyline { points, closed } => {
+                    for p in points {
+                        consider(*p, SnapKind::Endpoint);
+                    }
+                    let n = points.len();
+                    let segs = if *closed { n } else { n.saturating_sub(1) };
+                    for i in 0..segs {
+                        let (a, b) = (points[i], points[(i + 1) % n]);
+                        consider(
+                            Point { x: (a.x + b.x) / 2.0, y: (a.y + b.y) / 2.0 },
+                            SnapKind::Midpoint,
+                        );
+                    }
+                }
+            }
+        }
+
+        // จุดตัด: ตรวจเฉพาะคู่ของวัตถุที่อยู่ใกล้เมาส์ (จำกัด 32 ชิ้นกัน O(n²) บาน)
+        if settings.intersection {
+            let n = elems.len().min(32);
+            let lists: Vec<Vec<Prim>> = elems[..n].iter().map(|d| prims(d)).collect();
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    for a in &lists[i] {
+                        for b in &lists[j] {
+                            for p in intersect_prims(a, b) {
+                                consider(p, SnapKind::Intersection);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        best.map(|(_, p, k)| (p, k))
+    }
+
+    pub fn get_input_snap(
+        &self,
+        wx: f64,
+        wy: f64,
+        enabled: bool,
+        settings: &SnapSettings,
+    ) -> (f64, f64, Option<SnapKind>) {
+        if !enabled {
+            return (wx, wy, None);
+        }
+        if let Some((p, kind)) = self.find_object_snap(wx, wy, settings) {
+            return (p.x, p.y, Some(kind));
+        }
+        let (x, y) = self.get_snapped_pos(wx, wy, true);
+        (x, y, None)
     }
 
     pub fn update_auto_pan(&mut self, x: f64, y: f64, width: f64, height: f64) {
@@ -956,9 +1181,220 @@ impl Engine {
                         });
                     }
                 }
+                ElementData::Arc { center, radius, start_angle, end_angle } => {
+                    let c = self.camera.world_to_screen(center.x, center.y);
+                    commands.push(RenderCommand::Arc {
+                        cx: c.0,
+                        cy: c.1,
+                        radius: radius * self.camera.scale * draw_scale,
+                        start_angle: *start_angle,
+                        end_angle: *end_angle,
+                        is_selected: el.is_selected,
+                    });
+                }
+                ElementData::Polyline { points, closed } => {
+                    let bb = el.bounding_box();
+                    let (mx, my) = ((bb.min_x + bb.max_x) / 2.0, (bb.min_y + bb.max_y) / 2.0);
+                    let pts = points
+                        .iter()
+                        .map(|p| {
+                            self.camera.world_to_screen(
+                                mx + (p.x - mx) * draw_scale,
+                                my + (p.y - my) * draw_scale,
+                            )
+                        })
+                        .collect();
+                    commands.push(RenderCommand::Polyline {
+                        points: pts,
+                        closed: *closed,
+                        is_selected: el.is_selected,
+                    });
+                }
             }
         }
         commands
+    }
+}
+
+fn seg_seg(a1: Point, a2: Point, b1: Point, b2: Point) -> Option<Point> {
+    let (dx1, dy1) = (a2.x - a1.x, a2.y - a1.y);
+    let (dx2, dy2) = (b2.x - b1.x, b2.y - b1.y);
+    let denom = dx1 * dy2 - dy1 * dx2;
+    if denom.abs() < 1e-12 {
+        return None; // ขนานกัน
+    }
+    let (ex, ey) = (b1.x - a1.x, b1.y - a1.y);
+    let t = (ex * dy2 - ey * dx2) / denom;
+    let u = (ex * dy1 - ey * dx1) / denom;
+    let range = -1e-9..=1.0 + 1e-9;
+    if range.contains(&t) && range.contains(&u) {
+        Some(Point { x: a1.x + dx1 * t, y: a1.y + dy1 * t })
+    } else {
+        None
+    }
+}
+
+fn seg_circle(a1: Point, a2: Point, c: Point, r: f64) -> Vec<Point> {
+    let (dx, dy) = (a2.x - a1.x, a2.y - a1.y);
+    let (fx, fy) = (a1.x - c.x, a1.y - c.y);
+    let a = dx * dx + dy * dy;
+    if a < 1e-12 {
+        return vec![];
+    }
+    let b = 2.0 * (fx * dx + fy * dy);
+    let cc = fx * fx + fy * fy - r * r;
+    let disc = b * b - 4.0 * a * cc;
+    if disc < 0.0 {
+        return vec![];
+    }
+    let sq = disc.sqrt();
+    let range = -1e-9..=1.0 + 1e-9;
+    let mut out = Vec::new();
+    for t in [(-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)] {
+        if range.contains(&t) {
+            out.push(Point { x: a1.x + dx * t, y: a1.y + dy * t });
+        }
+    }
+    out
+}
+
+fn circle_circle(c1: Point, r1: f64, c2: Point, r2: f64) -> Vec<Point> {
+    let (dx, dy) = (c2.x - c1.x, c2.y - c1.y);
+    let d = (dx * dx + dy * dy).sqrt();
+    if d < 1e-9 || d > r1 + r2 || d < (r1 - r2).abs() {
+        return vec![];
+    }
+    let a = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
+    let h = (r1 * r1 - a * a).max(0.0).sqrt();
+    let (mx, my) = (c1.x + a * dx / d, c1.y + a * dy / d);
+    vec![
+        Point { x: mx - h * dy / d, y: my + h * dx / d },
+        Point { x: mx + h * dy / d, y: my - h * dx / d },
+    ]
+}
+
+fn intersect_elements(a: &ElementData, b: &ElementData) -> Vec<Point> {
+    use ElementData::*;
+    match (a, b) {
+        (Line { start: a1, end: a2 }, Line { start: b1, end: b2 }) => {
+            seg_seg(*a1, *a2, *b1, *b2).into_iter().collect()
+        }
+        (Line { start, end }, Circle { center, radius })
+        | (Circle { center, radius }, Line { start, end }) => {
+            seg_circle(*start, *end, *center, *radius)
+        }
+        (Circle { center: c1, radius: r1 }, Circle { center: c2, radius: r2 }) => {
+            circle_circle(*c1, *r1, *c2, *r2)
+        }
+        _ => vec![], // Dimension ไม่นับ
+    }
+}
+
+pub fn angle_in_range(a: f64, start: f64, end: f64) -> bool {
+    (a - start).rem_euclid(TAU) <= (end - start) + 1e-9
+}
+
+pub fn arc_point(c: Point, r: f64, a: f64) -> Point {
+    Point { x: c.x + r * a.cos(), y: c.y + r * a.sin() }
+}
+
+/// คืน (center, radius, start_angle, end_angle) โดย end > start และเส้นโค้งผ่านทั้งสามจุดตามลำดับ
+pub fn arc_from_three_points(p1: Point, p2: Point, p3: Point) -> Option<(Point, f64, f64, f64)> {
+    let d = 2.0 * (p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y));
+    if d.abs() < 1e-9 {
+        return None; // สามจุดอยู่ในแนวเส้นตรง
+    }
+    let (s1, s2, s3) = (
+        p1.x * p1.x + p1.y * p1.y,
+        p2.x * p2.x + p2.y * p2.y,
+        p3.x * p3.x + p3.y * p3.y,
+    );
+    let ux = (s1 * (p2.y - p3.y) + s2 * (p3.y - p1.y) + s3 * (p1.y - p2.y)) / d;
+    let uy = (s1 * (p3.x - p2.x) + s2 * (p1.x - p3.x) + s3 * (p2.x - p1.x)) / d;
+    let center = Point { x: ux, y: uy };
+    let radius = (p1.x - ux).hypot(p1.y - uy);
+    let ang = |p: Point| (p.y - uy).atan2(p.x - ux);
+
+    let ccw = (p2.x - p1.x) * (p3.y - p2.y) - (p2.y - p1.y) * (p3.x - p2.x) > 0.0;
+    let (start, mut end) = if ccw { (ang(p1), ang(p3)) } else { (ang(p3), ang(p1)) };
+    while end <= start {
+        end += TAU;
+    }
+    Some((center, radius, start, end))
+}
+
+fn arc_bounds(c: Point, r: f64, s: f64, e: f64) -> BoundingBox {
+    let mut pts = vec![arc_point(c, r, s), arc_point(c, r, e)];
+    for k in 0..4 {
+        let a = k as f64 * FRAC_PI_2;
+        if angle_in_range(a, s, e) {
+            pts.push(arc_point(c, r, a));
+        }
+    }
+    let mut b = BoundingBox { min_x: f64::MAX, min_y: f64::MAX, max_x: f64::MIN, max_y: f64::MIN };
+    for p in pts {
+        b.min_x = b.min_x.min(p.x);
+        b.min_y = b.min_y.min(p.y);
+        b.max_x = b.max_x.max(p.x);
+        b.max_y = b.max_y.max(p.y);
+    }
+    b
+}
+
+/// ชิ้นส่วนพื้นฐานสำหรับคำนวณจุดตัด
+enum Prim {
+    Seg(Point, Point),
+    Circle { c: Point, r: f64 },
+    Arc { c: Point, r: f64, s: f64, e: f64 },
+}
+
+fn prims(d: &ElementData) -> Vec<Prim> {
+    match d {
+        ElementData::Line { start, end } => vec![Prim::Seg(*start, *end)],
+        ElementData::Circle { center, radius } => vec![Prim::Circle { c: *center, r: *radius }],
+        ElementData::Arc { center, radius, start_angle, end_angle } => {
+            vec![Prim::Arc { c: *center, r: *radius, s: *start_angle, e: *end_angle }]
+        }
+        ElementData::Polyline { points, closed } => {
+            let n = points.len();
+            let segs = if *closed { n } else { n.saturating_sub(1) };
+            (0..segs).map(|i| Prim::Seg(points[i], points[(i + 1) % n])).collect()
+        }
+        ElementData::Dimension { .. } => vec![],
+    }
+}
+
+fn on_arc(p: Point, c: Point, s: f64, e: f64) -> bool {
+    angle_in_range((p.y - c.y).atan2(p.x - c.x), s, e)
+}
+
+fn intersect_prims(a: &Prim, b: &Prim) -> Vec<Point> {
+    use Prim::*;
+    match (a, b) {
+        (Seg(a1, a2), Seg(b1, b2)) => seg_seg(*a1, *a2, *b1, *b2).into_iter().collect(),
+        (Seg(a1, a2), Circle { c, r }) | (Circle { c, r }, Seg(a1, a2)) => {
+            seg_circle(*a1, *a2, *c, *r)
+        }
+        (Seg(a1, a2), Arc { c, r, s, e }) | (Arc { c, r, s, e }, Seg(a1, a2)) => {
+            seg_circle(*a1, *a2, *c, *r)
+                .into_iter()
+                .filter(|p| on_arc(*p, *c, *s, *e))
+                .collect()
+        }
+        (Circle { c: c1, r: r1 }, Circle { c: c2, r: r2 }) => circle_circle(*c1, *r1, *c2, *r2),
+        (Circle { c: c1, r: r1 }, Arc { c: c2, r: r2, s, e })
+        | (Arc { c: c2, r: r2, s, e }, Circle { c: c1, r: r1 }) => {
+            circle_circle(*c1, *r1, *c2, *r2)
+                .into_iter()
+                .filter(|p| on_arc(*p, *c2, *s, *e))
+                .collect()
+        }
+        (Arc { c: c1, r: r1, s: s1, e: e1 }, Arc { c: c2, r: r2, s: s2, e: e2 }) => {
+            circle_circle(*c1, *r1, *c2, *r2)
+                .into_iter()
+                .filter(|p| on_arc(*p, *c1, *s1, *e1) && on_arc(*p, *c2, *s2, *e2))
+                .collect()
+        }
     }
 }
 

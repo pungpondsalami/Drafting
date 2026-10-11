@@ -37,6 +37,15 @@ impl BoundingBox {
             max_y: self.max_y.max(other.max_y),
         }
     }
+
+    pub fn area(&self) -> f64 {
+        (self.max_x - self.min_x) * (self.max_y - self.min_y)
+    }
+
+    /// พื้นที่ที่ต้องขยายเพิ่ม ถ้าจะรวม other เข้ามา
+    pub fn enlargement(&self, other: &BoundingBox) -> f64 {
+        self.merge(other).area() - self.area()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -91,22 +100,55 @@ impl<T: Clone> SpatialIndex<T> {
         match current {
             RTreeNode::Leaf { .. } => vec![current, new_node],
             RTreeNode::Internal { mut children, .. } => {
-                // เลือกกิ่งที่จะใส่ (ในที่นี้เลือกตัวสุดท้ายเพื่อความง่าย)
-                let last_child = children.pop().unwrap();
-                let mut result_nodes = self.insert_recursive(last_child, new_node);
+                let new_bounds = new_node.bounds();
+
+                // เลือกกิ่งที่ bounds ขยายน้อยที่สุด
+                let best = children
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let ea = a.bounds().enlargement(&new_bounds);
+                        let eb = b.bounds().enlargement(&new_bounds);
+                        ea.partial_cmp(&eb)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| {
+                                a.bounds()
+                                    .area()
+                                    .partial_cmp(&b.bounds().area())
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap();
+
+                let chosen = children.remove(best);
+                let mut result_nodes = self.insert_recursive(chosen, new_node);
                 children.append(&mut result_nodes);
 
                 if children.len() > self.max_children {
                     self.split_node(children)
                 } else {
-                    let new_bounds = self.calculate_bounds(&children);
-                    vec![RTreeNode::Internal { bounds: new_bounds, children }]
+                    let bounds = self.calculate_bounds(&children);
+                    vec![RTreeNode::Internal { bounds, children }]
                 }
             }
         }
     }
 
     fn split_node(&self, mut children: Vec<RTreeNode<T>>) -> Vec<RTreeNode<T>> {
+        let total = self.calculate_bounds(&children);
+        let split_on_x = (total.max_x - total.min_x) >= (total.max_y - total.min_y);
+
+        children.sort_by(|a, b| {
+            let (ba, bb) = (a.bounds(), b.bounds());
+            let (ca, cb) = if split_on_x {
+                (ba.min_x + ba.max_x, bb.min_x + bb.max_x)
+            } else {
+                (ba.min_y + ba.max_y, bb.min_y + bb.max_y)
+            };
+            ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
         let mid = children.len() / 2;
         let right_children = children.split_off(mid);
         vec![

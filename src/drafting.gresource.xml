@@ -4,7 +4,7 @@
     <file preprocess="xml-stripblanks">window.ui</file>
     <file preprocess="xml-stripblanks">shortcuts-dialog.ui</file>
     <file>icons/draw-line-symbolic.svg</file>
-    <file>icons/circle-outline-thick-symbolic.svg</file>
+    <file>icons/draw-circle-symbolic.svg</file>
     <file>icons/magnet-symbolic.svg</file>
     <file>icons/ruler-outline-horizontal-symbolic.svg</file>
     <file>icons/plus-large-square-outline-symbolic.svg</file>
@@ -13,6 +13,11 @@
     <file>icons/grid-filled-symbolic.svg</file>
     <file>icons/arrow-pointing-at-line-down-symbolic.svg</file>
     <file>icons/four-arrows-pointing-outward-symbolic.svg</file>
+    <file>icons/document-open-symbolic.svg</file>
+    <file>icons/pan-end-symbolic.svg</file>
+    <file>icons/pan-start-symbolic.svg</file>
+    <file>icons/draw-arc-symbolic.svg</file>
+    <file>icons/draw-polyline-symbolic.svg</file>
   </gresource>
 </gresources>
 

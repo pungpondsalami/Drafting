@@ -125,6 +125,31 @@ mod imp {
                 button:active image {
                     transform: scale(0.88);
                 }
+
+                button.drafting-expander image {
+                    transition: transform 250ms cubic-bezier(0.34, 1.56, 0.64, 1);
+                }
+
+                button.drafting-expander:checked image {
+                    transform: rotate(180deg);
+                }
+
+                /* ตอนกดค้างขณะหมุนอยู่ ให้ย่อและคงมุมไว้ ไม่เด้งกลับ */
+                button.drafting-expander:checked:active image {
+                    transform: rotate(180deg) scale(0.88);
+                }
+
+                .drafting-grip {
+                    background-color: alpha(white, 0.28);
+                    border-radius: 10px;
+                    min-width: 40px;
+                    min-height: 15px;
+                    transition: background-color 150ms ease;
+                }
+
+                .drafting-handle:hover .drafting-grip {
+                    background-color: alpha(white, 0.55);
+                }
             "#);
             gtk::style_context_add_provider_for_display(
                 &gtk::gdk::Display::default().unwrap(),
@@ -162,7 +187,10 @@ impl DraftingApplication {
 
     fn setup_gactions(&self) {
         let quit_action = gio::ActionEntry::builder("quit")
-            .activate(move |app: &Self, _, _| app.quit())
+            .activate(move |app: &Self, _, _| match app.active_window() {
+                Some(w) => w.close(),
+                None => app.quit(),
+            })
             .build();
         let about_action = gio::ActionEntry::builder("about")
             .activate(move |app: &Self, _, _| app.show_about())
