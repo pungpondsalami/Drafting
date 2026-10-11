@@ -39,7 +39,7 @@
 
             <!-- Window Controls มุมขวาบน -->
             <child type="overlay">
-              <object class="GtkBox">
+              <object class="GtkWindowHandle">
                 <property name="halign">end</property>
                 <property name="valign">start</property>
                 <property name="margin-end">12</property>
@@ -50,33 +50,17 @@
                   <class name="drafting-floating"/>
                 </style>
                 <child>
+                  <object class="GtkBox">
+                    <property name="width-request">28</property>
+                  </object>
+                </child>
+                <child>
                   <!-- เพิ่ม wrapper box เพื่อควบคุมขนาดปุ่มภายใน -->
                   <object class="GtkBox">
                     <child type="end">
                       <object class="GtkMenuButton">
                         <property name="icon-name">open-menu-symbolic</property>
                         <property name="menu-model">primary_menu</property>
-                      </object>
-                    </child>
-                    <!-- Drag handle กลางขอบบน -->
-                    <child type="overlay">
-                      <object class="GtkWindowHandle">
-                      <property name="halign">center</property>
-                      <property name="valign">start</property>
-                      <style><class name="drafting-handle"/></style>
-                        <child>
-                          <object class="GtkBox">
-                          <property name="margin-top">8</property>
-                          <property name="margin-bottom">10</property>
-                          <property name="margin-start">24</property>
-                          <property name="margin-end">24</property>
-                            <child>
-                              <object class="GtkBox">
-                              <style><class name="drafting-grip"/></style>
-                              </object>
-                            </child>
-                          </object>
-                        </child>
                       </object>
                     </child>
                     <child>

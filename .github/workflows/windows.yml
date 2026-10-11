@@ -31,8 +31,7 @@ jobs:
           key: gvsbuild-gtk4-libadwaita-${{ runner.os }}-v3
 
       - name: Build GTK4 + libadwaita
-        if: steps.cache-gtk.outputs.cache-hit != 'true'
-        run: gvsbuild build gtk4 libadwaita
+        run: gvsbuild build --vs-install-path "C:\Program Files\Microsoft Visual Studio\18\Enterprise" gtk4 libadwaita
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
