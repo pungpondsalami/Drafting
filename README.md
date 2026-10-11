@@ -1,4 +1,4 @@
-![Drafting Screenshot](docs/Drafting-logo.png)
+![Drafting Screenshot](docs/Drafting-logo-text.png)
 
 # Drafting
 
