@@ -1,23 +1,36 @@
-![Drafting Screenshot](docs/Drafting-logo-text.png)
+![Drafting](docs/Drafting-logo-text.png)
 
 # Drafting
 
-A simple 2D CAD application for Linux, built with GTK4 and libadwaita.
+A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows developer preview is also available.
 
 ![Drafting Screenshot](docs/Drafting-preview.png)
 
 ## Features
 
-- Draw lines, circles, and linear dimensions
+- Draw lines, circles, 3-point arcs, polylines and linear dimensions
+- Object snap: endpoint, midpoint, center, quadrant and intersection, each toggleable from the snap settings dock
 - Grid snapping with adaptive LOD grid
-- Multi-tab support
+- Multi-tab support, with an unsaved-changes prompt before closing
+- Open, Save and Save As for DXF files (the file path is remembered per tab)
 - Rectangular array with animated preview
 - Multi-select with window/crossing selection (AutoCAD-style)
 - Move tool with snap
-- Undo/Redo
+- Undo / Redo
 - Command bar interface
-- DXF export
 - Auto-pan at window edges
+
+## DXF Support
+
+| Entity | Open | Save |
+|---|---|---|
+| Line | Yes | Yes |
+| Circle | Yes | Yes |
+| Arc | Yes | Yes |
+| LWPolyline | Yes (bulge segments load as straight lines) | Yes |
+| Linear dimension | No | Saved as three plain lines |
+
+Other entity types are skipped when opening a file.
 
 ## Installation
 
@@ -35,6 +48,13 @@ Windows builds are available as MSIX packages via [GitHub Actions](https://githu
 
 Since the package is self-signed, you'll need to install the certificate first.
 See [installation guide](docs/Steps_for_installing_Drafting_on_the_Windows_developer_version.pdf) for step-by-step instructions.
+
+In short, from an Administrator PowerShell:
+
+```powershell
+Import-Certificate -FilePath .\drafting-cert.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+Add-AppxPackage .\drafting.msix
+```
 
 ## Building from Source
 
@@ -69,8 +89,13 @@ cargo run
 | `S` | Select mode |
 | `Z` | Zoom to cursor |
 | `Ctrl+F` | Zoom to fit |
+| `Ctrl+O` | Open file |
+| `Ctrl+S` | Save (asks for a name if the drawing is untitled) |
+| `Ctrl+Shift+S` | Save As |
 | `Ctrl+Z` | Undo |
+| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
 | `F9` | Toggle snap |
+| `Enter` | Finish polyline |
 | `Esc` | Cancel / back to select |
 
 ## Command Bar
@@ -81,11 +106,16 @@ Type commands in the command bar at the bottom:
 |---|---|
 | `l`, `line` | Line tool |
 | `c`, `circle` | Circle tool |
+| `a`, `arc` | 3-point arc tool |
+| `pl`, `pline`, `polyline` | Polyline tool |
 | `ar`, `array` | Rectangular array |
 | `fit` | Zoom to fit |
 | `z` | Zoom in at cursor |
 | `u`, `undo` | Undo |
-| `save` | Save as DXF |
+| `r`, `redo` | Redo |
+| `o`, `open` | Open a DXF file |
+| `save` | Save |
+| `saveas` | Save As |
 
 ## License
 
