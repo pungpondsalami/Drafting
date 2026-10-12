@@ -18,6 +18,7 @@
     <file>icons/pan-start-symbolic.svg</file>
     <file>icons/draw-arc-symbolic.svg</file>
     <file>icons/draw-polyline-symbolic.svg</file>
+    <file>icons/dot-node-pointer-left-symbolic.svg</file>
   </gresource>
 </gresources>
 

@@ -105,6 +105,8 @@ mod imp {
         pub btn_arc: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_polyline: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_select: TemplateChild<gtk::Button>,
 
         pub current_mode: Cell<crate::engine::ToolMode>,
         pub mouse_pos: Cell<(f64, f64)>,
@@ -125,6 +127,7 @@ mod imp {
         pub force_close: Cell<bool>,
         pub snap_settings: Cell<SnapSettings>,
         pub pending_points: RefCell<Vec<Point>>,
+        pub synced_mode: Cell<Option<DrawingMode>>,
     }
 
     #[glib::object_subclass]
@@ -216,31 +219,7 @@ mod imp {
 
                     // Cancel Action: กด Esc
                     if key == gdk::Key::Escape {
-                        obj.imp().start_pos.set(None);
-                        obj.imp().pending_points.borrow_mut().clear();
-                        obj.imp().current_mode.set(DrawingMode::Select);
-                        obj.imp().drag_start.set(None);
-
-                        // ปิด revealer ก่อน แล้วค่อย switch stack
-                        obj.imp().revealer_array_ui.set_reveal_child(false);
-                        glib::timeout_add_local_once(
-                            std::time::Duration::from_millis(300),
-                            glib::clone!(
-                                #[weak]
-                                obj,
-                                move || {
-                                    obj.imp().right_dock.set_visible_child_name("default");
-                                }
-                            ),
-                        );
-
-                        if let Some(page) = obj.imp().tab_view.selected_page() {
-                            let pages = obj.imp().pages.borrow();
-                            if let Some(d_ref) = pages.get(&page) {
-                                d_ref.borrow_mut().deselect_all();
-                            }
-                            page.child().queue_draw();
-                        }
+                        obj.cancel_action(true);
                         return glib::Propagation::Stop;
                     }
 
@@ -573,11 +552,18 @@ mod imp {
                 }
             ));
 
+            self.btn_select.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.cancel_action(false)
+            ));
+
             self.btn_arc.connect_clicked(glib::clone!(
                 #[weak]
                 obj,
                 move |_| obj.set_tool(DrawingMode::Arc)
             ));
+
             self.btn_polyline.connect_clicked(glib::clone!(
                 #[weak]
                 obj,
@@ -701,6 +687,68 @@ impl DraftingWindow {
         }
     }
 
+    /// ให้ปุ่มของเครื่องมือที่ใช้อยู่ขึ้นสถานะ active (เรียกจาก tick ทุกเฟรม แต่ทำงานเฉพาะตอนโหมดเปลี่ยน)
+    fn sync_tool_buttons(&self) {
+        let imp = self.imp();
+        let mode = imp.current_mode.get();
+        if imp.synced_mode.get() == Some(mode) {
+            return;
+        }
+        imp.synced_mode.set(Some(mode));
+
+        let buttons: [(&gtk::Button, DrawingMode); 7] = [
+            (&imp.btn_select, DrawingMode::Select),
+            (&imp.btn_line, DrawingMode::Line),
+            (&imp.btn_circle, DrawingMode::Circle),
+            (&imp.btn_arc, DrawingMode::Arc),
+            (&imp.btn_polyline, DrawingMode::Polyline),
+            (&imp.btn_dimension, DrawingMode::Dimension),
+            (&imp.btn_array, DrawingMode::Array),
+        ];
+        for (btn, m) in buttons {
+            // ระหว่างลากย้าย (Move) ถือว่ายังอยู่ใน Select
+            let active = m == mode || (m == DrawingMode::Select && mode == DrawingMode::Move);
+            if active {
+                btn.add_css_class("tool-active");
+            } else {
+                btn.remove_css_class("tool-active");
+            }
+        }
+    }
+
+    /// ยกเลิกสิ่งที่ค้างอยู่แล้วกลับ Select (Esc = deselect ด้วย, ปุ่ม Select = ไม่ deselect)
+    pub fn cancel_action(&self, deselect: bool) {
+        let imp = self.imp();
+        imp.start_pos.set(None);
+        imp.pending_points.borrow_mut().clear();
+        imp.dimension_step.set(0);
+        imp.dim_temp_start.set(None);
+        imp.dim_temp_end.set(None);
+        imp.drag_start.set(None);
+        imp.current_mode.set(DrawingMode::Select);
+
+        // ปิด revealer ก่อน แล้วค่อย switch stack
+        imp.revealer_array_ui.set_reveal_child(false);
+        glib::timeout_add_local_once(
+            std::time::Duration::from_millis(300),
+            glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move || obj.imp().right_dock.set_visible_child_name("default")
+            ),
+        );
+
+        if let Some(page) = imp.tab_view.selected_page() {
+            if deselect {
+                let pages = imp.pages.borrow();
+                if let Some(d_ref) = pages.get(&page) {
+                    d_ref.borrow_mut().deselect_all();
+                }
+            }
+            page.child().queue_draw();
+        }
+    }
+
     /// จบ polyline แบบเปิด (กด Enter)
     fn finish_polyline(&self) {
         let imp = self.imp();
@@ -779,6 +827,7 @@ impl DraftingWindow {
             #[upgrade_or]
             glib::ControlFlow::Continue,
             move |area, clock| {
+                obj.sync_tool_buttons();
                 let pages = obj.imp().pages.borrow();
                 if let Some(d_ref) = pages.get(&page) {
                     let mut d = d_ref.borrow_mut();

@@ -150,6 +150,15 @@ mod imp {
                 .drafting-handle:hover .drafting-grip {
                     background-color: alpha(white, 0.55);
                 }
+
+                button.tool-active {
+                    background-color: alpha(@accent_bg_color, 0.55);
+                    color: @accent_fg_color;
+                }
+
+                button.tool-active:hover {
+                    background-color: alpha(@accent_bg_color, 0.7);
+                }
             "#);
             gtk::style_context_add_provider_for_display(
                 &gtk::gdk::Display::default().unwrap(),

@@ -51,13 +51,12 @@
                 </style>
                 <child>
                   <object class="GtkBox">
-                    <property name="width-request">28</property>
-                  </object>
-                </child>
-                <child>
-                  <!-- เพิ่ม wrapper box เพื่อควบคุมขนาดปุ่มภายใน -->
-                  <object class="GtkBox">
-                    <child type="end">
+                    <child>
+                      <object class="GtkBox">
+                        <property name="width-request">28</property>
+                      </object>
+                    </child>
+                    <child>
                       <object class="GtkMenuButton">
                         <property name="icon-name">open-menu-symbolic</property>
                         <property name="menu-model">primary_menu</property>
@@ -138,6 +137,12 @@
                   <class name="toolbar"/>
                   <class name="drafting-floating"/>
                 </style>
+                <child>
+                  <object class="GtkButton" id="btn_select">
+                    <property name="icon-name">dot-node-pointer-left-symbolic</property>
+                    <property name="tooltip-text">Select (Esc)</property>
+                  </object>
+                </child>
                 <child>
                   <object class="GtkButton" id="btn_line">
                     <property name="icon-name">draw-line-symbolic</property>
