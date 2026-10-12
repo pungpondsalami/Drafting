@@ -57,6 +57,7 @@ pub enum ToolMode {
     Dimension,
     Arc,
     Polyline,
+    Offset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -528,6 +529,34 @@ impl Engine {
 
     pub fn hover_at(&mut self, world_x: f64, world_y: f64) {
         self.hovered_id = self.pick_at(world_x, world_y);
+    }
+
+    /// คลิกเลือกต้นแบบสำหรับ Offset (ไม่รับ Dimension) คืน id ถ้าเลือกได้
+    pub fn offset_pick(&mut self, wx: f64, wy: f64) -> Option<u64> {
+        let id = self.pick_at(wx, wy)?;
+        let i = self.index_of(id)?;
+        if matches!(self.history[i].data, ElementData::Dimension { .. }) {
+            return None;
+        }
+        self.deselect_all();
+        self.history[i].is_selected = true;
+        Some(id)
+    }
+
+    /// ตัวอย่างผลลัพธ์ตามตำแหน่งเมาส์ (ใช้วาดเงา)
+    pub fn offset_preview(&self, id: u64, side: Point, dist: f64) -> Option<ElementData> {
+        let i = self.index_of(id)?;
+        offset_data(&self.history[i].data, side, dist).ok()
+    }
+
+    /// สร้างสำเนา offset ไปด้านที่ side ชี้อยู่
+    pub fn offset_apply(&mut self, id: u64, side: Point, dist: f64) -> Result<(), &'static str> {
+        let i = self.index_of(id).ok_or("Object no longer exists")?;
+        let data = offset_data(&self.history[i].data, side, dist)?;
+        self.checkpoint();
+        let new_id = self.get_next_id();
+        self.add_element(DrawingElement { id: new_id, is_selected: false, data });
+        Ok(())
     }
 
     pub fn select_in_box(
@@ -1441,6 +1470,137 @@ fn dimension_segments(start: Point, end: Point, offset: f64) -> Vec<(Point, Poin
     }
 }
 
+fn offset_radius(c: Point, r: f64, side: Point, dist: f64) -> Result<f64, &'static str> {
+    let dc = (side.x - c.x).hypot(side.y - c.y);
+    let nr = if dc < r { r - dist } else { r + dist };
+    if nr <= 1e-9 {
+        Err("Distance is larger than the radius")
+    } else {
+        Ok(nr)
+    }
+}
+
+fn line_line(p1: Point, u1: (f64, f64), p2: Point, u2: (f64, f64)) -> Option<Point> {
+    let den = u1.0 * u2.1 - u1.1 * u2.0;
+    if den.abs() < 1e-9 {
+        return None; // ขนานกัน
+    }
+    let t = ((p2.x - p1.x) * u2.1 - (p2.y - p1.y) * u2.0) / den;
+    Some(Point { x: p1.x + u1.0 * t, y: p1.y + u1.1 * t })
+}
+
+fn offset_polyline(
+    points: &[Point],
+    closed: bool,
+    side: Point,
+    dist: f64,
+) -> Result<Vec<Point>, &'static str> {
+    // ตัดจุดซ้ำติดกันออกก่อน
+    let mut pts: Vec<Point> = Vec::with_capacity(points.len());
+    for p in points {
+        if pts.last().map_or(true, |l| (l.x - p.x).hypot(l.y - p.y) > 1e-9) {
+            pts.push(*p);
+        }
+    }
+    if closed && pts.len() > 1 {
+        let (f, l) = (pts[0], pts[pts.len() - 1]);
+        if (f.x - l.x).hypot(f.y - l.y) <= 1e-9 {
+            pts.pop();
+        }
+    }
+    let n = pts.len();
+    if n < 2 || (closed && n < 3) {
+        return Err("Polyline is too short to offset");
+    }
+    let segs = if closed { n } else { n - 1 };
+
+    let dirs: Vec<(f64, f64)> = (0..segs)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            let l = (b.x - a.x).hypot(b.y - a.y);
+            ((b.x - a.x) / l, (b.y - a.y) / l)
+        })
+        .collect();
+
+    // ด้านที่เลือก: ดูจากส่วนที่อยู่ใกล้เมาส์ที่สุด
+    let mut best = (f64::MAX, 1.0_f64);
+    for i in 0..segs {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        let d = dist_point_seg(side, a, b);
+        if d < best.0 {
+            let side_dot = -dirs[i].1 * (side.x - a.x) + dirs[i].0 * (side.y - a.y);
+            best = (d, if side_dot >= 0.0 { 1.0 } else { -1.0 });
+        }
+    }
+    let sign = best.1;
+
+    let normal = |i: usize| (-dirs[i].1 * sign * dist, dirs[i].0 * sign * dist);
+    let base = |i: usize| {
+        let (ox, oy) = normal(i);
+        Point { x: pts[i].x + ox, y: pts[i].y + oy }
+    };
+
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let p = if !closed && k == 0 {
+            base(0)
+        } else if !closed && k == n - 1 {
+            let (ox, oy) = normal(n - 2);
+            Point { x: pts[k].x + ox, y: pts[k].y + oy }
+        } else {
+            let prev = (k + n - 1) % n;
+            line_line(base(prev), dirs[prev], base(k), dirs[k]).unwrap_or_else(|| {
+                let (ox, oy) = normal(prev);
+                Point { x: pts[k].x + ox, y: pts[k].y + oy }
+            })
+        };
+        out.push(p);
+    }
+
+    // ถ้าส่วนไหนกลับทิศ แปลว่าระยะใหญ่เกินรูป
+    for i in 0..segs {
+        let (a, b) = (out[i], out[(i + 1) % n]);
+        if (b.x - a.x) * dirs[i].0 + (b.y - a.y) * dirs[i].1 <= 1e-9 {
+            return Err("Distance is too large for this shape");
+        }
+    }
+    Ok(out)
+}
+
+fn offset_data(data: &ElementData, side: Point, dist: f64) -> Result<ElementData, &'static str> {
+    match data {
+        ElementData::Line { start, end } => {
+            let len = (end.x - start.x).hypot(end.y - start.y);
+            if len < 1e-9 {
+                return Err("Line has zero length");
+            }
+            let (ux, uy) = ((end.x - start.x) / len, (end.y - start.y) / len);
+            let side_dot = -uy * (side.x - start.x) + ux * (side.y - start.y);
+            let s = if side_dot >= 0.0 { 1.0 } else { -1.0 };
+            let (ox, oy) = (-uy * s * dist, ux * s * dist);
+            Ok(ElementData::Line {
+                start: Point { x: start.x + ox, y: start.y + oy },
+                end: Point { x: end.x + ox, y: end.y + oy },
+            })
+        }
+        ElementData::Circle { center, radius } => Ok(ElementData::Circle {
+            center: *center,
+            radius: offset_radius(*center, *radius, side, dist)?,
+        }),
+        ElementData::Arc { center, radius, start_angle, end_angle } => Ok(ElementData::Arc {
+            center: *center,
+            radius: offset_radius(*center, *radius, side, dist)?,
+            start_angle: *start_angle,
+            end_angle: *end_angle,
+        }),
+        ElementData::Polyline { points, closed } => Ok(ElementData::Polyline {
+            points: offset_polyline(points, *closed, side, dist)?,
+            closed: *closed,
+        }),
+        ElementData::Dimension { .. } => Err("Dimensions can't be offset"),
+    }
+}
+
 impl ElementData {
     /// ระยะจากจุดถึงเส้นจริงของชิ้นงาน (หน่วยโลก)
     pub fn distance_to(&self, p: Point) -> f64 {
@@ -1543,4 +1703,3 @@ mod tests {
         println!("--- Test Passed! Engine is UI-Independent ---\n");
     }
 }
-

@@ -128,6 +128,9 @@ mod imp {
         pub snap_settings: Cell<SnapSettings>,
         pub pending_points: RefCell<Vec<Point>>,
         pub synced_mode: Cell<Option<DrawingMode>>,
+        pub offset_distance: Cell<f64>,
+        pub offset_source: Cell<Option<u64>>,
+        pub offset_msg: RefCell<String>,
     }
 
     #[glib::object_subclass]
@@ -262,6 +265,7 @@ mod imp {
                             gdk::Key::a | gdk::Key::A => Some(DrawingMode::Arc),
                             gdk::Key::p | gdk::Key::P => Some(DrawingMode::Polyline),
                             gdk::Key::d | gdk::Key::D => Some(DrawingMode::Dimension),
+                            gdk::Key::o | gdk::Key::O => Some(DrawingMode::Offset),
                             _ => None,
                         };
                         if let Some(mode) = tool {
@@ -599,6 +603,36 @@ mod imp {
                 move |entry| {
                     let text = entry.text().to_string().to_lowercase().trim().to_string();
 
+                    // offset / of [ระยะ]  หรือพิมพ์ตัวเลขล้วนตอนอยู่ในโหมด Offset
+                    {
+                        let mut parts = text.split_whitespace();
+                        let first = parts.next().unwrap_or("");
+                        let handled = if first == "of" || first == "offset" {
+                            obj.set_tool(DrawingMode::Offset);
+                            if let Some(v) = parts.next().and_then(|s| s.parse::<f64>().ok()) {
+                                obj.set_offset_distance(v);
+                            }
+                            true
+                        } else if obj.imp().current_mode.get() == DrawingMode::Offset {
+                            match text.parse::<f64>() {
+                                Ok(v) => {
+                                    obj.set_offset_distance(v);
+                                    true
+                                }
+                                Err(_) => false,
+                            }
+                        } else {
+                            false
+                        };
+                        if handled {
+                            entry.set_text("");
+                            if let Some(page) = obj.imp().tab_view.selected_page() {
+                                page.child().grab_focus();
+                            }
+                            return;
+                        }
+                    }
+
                     if let Some(page) = obj.imp().tab_view.selected_page() {
                         let (w, h) = (page.child().width() as f64, page.child().height() as f64);
 
@@ -708,6 +742,21 @@ impl DraftingWindow {
         imp.start_pos.set(None);
         imp.dimension_step.set(0);
         imp.pending_points.borrow_mut().clear();
+        imp.offset_source.set(None);
+        imp.offset_msg.borrow_mut().clear();
+        if let Some(page) = imp.tab_view.selected_page() {
+            page.child().queue_draw();
+        }
+    }
+
+    pub fn set_offset_distance(&self, v: f64) {
+        let imp = self.imp();
+        if v > 0.0 {
+            imp.offset_distance.set(v);
+            imp.offset_msg.borrow_mut().clear();
+        } else {
+            *imp.offset_msg.borrow_mut() = "Distance must be greater than 0".into();
+        }
         if let Some(page) = imp.tab_view.selected_page() {
             page.child().queue_draw();
         }
@@ -747,6 +796,8 @@ impl DraftingWindow {
         let imp = self.imp();
         imp.start_pos.set(None);
         imp.pending_points.borrow_mut().clear();
+        imp.offset_source.set(None);
+        imp.offset_msg.borrow_mut().clear();
         imp.dimension_step.set(0);
         imp.dim_temp_start.set(None);
         imp.dim_temp_end.set(None);
@@ -1131,6 +1182,27 @@ impl DraftingWindow {
                                 pts.push(p);
                             }
                         }
+
+                        DrawingMode::Offset => {
+                            let dist = imp.offset_distance.get();
+                            if dist <= 0.0 {
+                                *imp.offset_msg.borrow_mut() =
+                                    "Type a distance in the command bar first".into();
+                            } else if let Some(id) = imp.offset_source.get() {
+                                match d.offset_apply(id, Point { x: wx, y: wy }, dist) {
+                                    Ok(()) => {
+                                        d.deselect_all();
+                                        imp.offset_source.set(None);
+                                        imp.offset_msg.borrow_mut().clear();
+                                    }
+                                    Err(msg) => *imp.offset_msg.borrow_mut() = msg.into(),
+                                }
+                            } else if let Some(id) = d.offset_pick(wx, wy) {
+                                imp.offset_source.set(Some(id));
+                                imp.offset_msg.borrow_mut().clear();
+                            }
+                        }
+
                         DrawingMode::Move => {}
                     }
                 }
@@ -1374,7 +1446,7 @@ impl DraftingWindow {
                 DrawingMode::Select => {}
                 DrawingMode::Array => {}
                 DrawingMode::Move => {}
-                DrawingMode::Arc | DrawingMode::Polyline => {}
+                DrawingMode::Arc | DrawingMode::Polyline | DrawingMode::Offset => {}
 
                 // --- Dimension ---
                 DrawingMode::Dimension => {
@@ -1503,6 +1575,42 @@ impl DraftingWindow {
             }
         }
 
+        // --- Offset preview ---
+        if imp.current_mode.get() == DrawingMode::Offset {
+            if let Some(id) = imp.offset_source.get() {
+                let dist = imp.offset_distance.get();
+                if let Some(data) = d.offset_preview(id, Point { x: wx, y: wy }, dist) {
+                    cr.new_path();
+                    cr.set_source_rgba(1.0, 0.5, 0.0, 0.8);
+                    cr.set_line_width(1.5);
+                    match data {
+                        ElementData::Line { start, end } => {
+                            let (a, b) = (cam.world_to_screen(start.x, start.y), cam.world_to_screen(end.x, end.y));
+                            cr.move_to(a.0, a.1);
+                            cr.line_to(b.0, b.1);
+                        }
+                        ElementData::Circle { center, radius } => {
+                            let c = cam.world_to_screen(center.x, center.y);
+                            cr.arc(c.0, c.1, radius * cam.scale, 0.0, std::f64::consts::TAU);
+                        }
+                        ElementData::Arc { center, radius, start_angle, end_angle } => {
+                            let c = cam.world_to_screen(center.x, center.y);
+                            cr.arc_negative(c.0, c.1, radius * cam.scale, -start_angle, -end_angle);
+                        }
+                        ElementData::Polyline { points, closed } => {
+                            for (i, p) in points.iter().enumerate() {
+                                let s = cam.world_to_screen(p.x, p.y);
+                                if i == 0 { cr.move_to(s.0, s.1); } else { cr.line_to(s.0, s.1); }
+                            }
+                            if closed { cr.close_path(); }
+                        }
+                        _ => {}
+                    }
+                    let _ = cr.stroke();
+                }
+            }
+        }
+
         // --- Selection Box ---
         if imp.is_dragging.get() && imp.current_mode.get() == DrawingMode::Select {
             if let Some((sx, sy)) = imp.drag_start.get() {
@@ -1588,15 +1696,32 @@ impl DraftingWindow {
             DrawingMode::Dimension => "DIM (LINEAR)",
             DrawingMode::Arc => "ARC (3-POINT)",
             DrawingMode::Polyline => "POLYLINE",
+            DrawingMode::Offset => "OFFSET",
         };
 
-            let txt = format!(
-            "MODE: [{}]  X: {:.2} Y: {:.2} {}{}",
+        let offset_hint = if imp.current_mode.get() == DrawingMode::Offset {
+            let dist = imp.offset_distance.get();
+            let msg = imp.offset_msg.borrow();
+            let step = if dist <= 0.0 {
+                "type distance + Enter".to_string()
+            } else if imp.offset_source.get().is_none() {
+                format!("d={} | pick object", dist)
+            } else {
+                format!("d={} | click side", dist)
+            };
+            if msg.is_empty() { format!("  {}", step) } else { format!("  {} | {}", step, msg) }
+        } else {
+            String::new()
+        };
+
+        let txt = format!(
+            "MODE: [{}]  X: {:.2} Y: {:.2} {}{}{}",
             mode_text,
             sn_x,
             sn_y,
             if imp.snap_enabled.get() { "[SNAP]" } else { "" },
             snap_kind.map(|k| format!(" [{}]", k.label())).unwrap_or_default(),
+            offset_hint,
         );
 
         let layout = gtk::pango::Layout::new(&page.child().pango_context());
