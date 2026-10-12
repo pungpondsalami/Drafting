@@ -183,10 +183,13 @@ mod imp {
                 move |_, key, _, state| {
                     let is_ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                     let is_shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+                    let typing = obj.is_typing();
 
                     // Redo: Ctrl+Y หรือ Ctrl+Shift+Z
-                    if is_ctrl && (key == gdk::Key::y || key == gdk::Key::Y
-                        || (is_shift && (key == gdk::Key::z || key == gdk::Key::Z)))
+                    if is_ctrl
+                        && (key == gdk::Key::y
+                            || key == gdk::Key::Y
+                            || (is_shift && (key == gdk::Key::z || key == gdk::Key::Z)))
                     {
                         obj.redo_action();
                         return glib::Propagation::Stop;
@@ -198,18 +201,16 @@ mod imp {
                         return glib::Propagation::Stop;
                     }
 
-                    // Snap: กด F9
-                    // เช็กแค่ key == F9 อย่างเดียว
+                    // Snap: F9
                     if key == gdk::Key::F9 {
                         let btn = &obj.imp().btn_snap;
-                        let new_state = !btn.is_active();
-                        btn.set_active(new_state); // สลับสถานะปุ่ม Snap บน UI
-                        println!("F9 Pressed: Snap toggled to {}", new_state);
+                        btn.set_active(!btn.is_active());
                         return glib::Propagation::Stop;
                     }
 
                     // Enter: จบ polyline
                     if (key == gdk::Key::Return || key == gdk::Key::KP_Enter)
+                        && !typing
                         && obj.imp().current_mode.get() == DrawingMode::Polyline
                         && !obj.imp().pending_points.borrow().is_empty()
                     {
@@ -217,7 +218,7 @@ mod imp {
                         return glib::Propagation::Stop;
                     }
 
-                    // Cancel Action: กด Esc
+                    // Cancel Action: Esc
                     if key == gdk::Key::Escape {
                         obj.cancel_action(true);
                         return glib::Propagation::Stop;
@@ -237,8 +238,8 @@ mod imp {
                         return glib::Propagation::Stop;
                     }
 
-                    // Undo
-                    if key == gdk::Key::z || key == gdk::Key::Z {
+                    // Zoom to cursor: Z
+                    if (key == gdk::Key::z || key == gdk::Key::Z) && !typing {
                         if let Some(page) = obj.imp().tab_view.selected_page() {
                             let (w, h) =
                                 (page.child().width() as f64, page.child().height() as f64);
@@ -247,17 +248,39 @@ mod imp {
                                 let mut d = d_ref.borrow_mut();
                                 let (mx, my) = obj.imp().mouse_pos.get();
                                 let (wx, wy) = d.camera.screen_to_world(mx, my);
-
-                                // พุ่งเข้าหาจุดที่เมาส์ชี้ ให้มาอยู่กลางจอ
                                 d.camera.zoom_to_point(wx, wy, (w, h), 2.0);
                             }
                         }
                         return glib::Propagation::Stop;
                     }
 
+                    // คีย์ลัดเลือกเครื่องมือ (ไม่มี Ctrl/Alt และไม่ได้พิมพ์อยู่)
+                    if !is_ctrl && !typing && !state.contains(gdk::ModifierType::ALT_MASK) {
+                        let tool = match key {
+                            gdk::Key::l | gdk::Key::L => Some(DrawingMode::Line),
+                            gdk::Key::c | gdk::Key::C => Some(DrawingMode::Circle),
+                            gdk::Key::a | gdk::Key::A => Some(DrawingMode::Arc),
+                            gdk::Key::p | gdk::Key::P => Some(DrawingMode::Polyline),
+                            gdk::Key::d | gdk::Key::D => Some(DrawingMode::Dimension),
+                            _ => None,
+                        };
+                        if let Some(mode) = tool {
+                            obj.set_tool(mode);
+                            return glib::Propagation::Stop;
+                        }
+                        if key == gdk::Key::s || key == gdk::Key::S {
+                            obj.cancel_action(false);
+                            return glib::Propagation::Stop;
+                        }
+                    }
+
                     // Save / Save As / Open
                     if is_ctrl && (key == gdk::Key::s || key == gdk::Key::S) {
-                        if is_shift { obj.save_as_action(); } else { obj.save_action(); }
+                        if is_shift {
+                            obj.save_as_action();
+                        } else {
+                            obj.save_action();
+                        }
                         return glib::Propagation::Stop;
                     }
                     if is_ctrl && (key == gdk::Key::o || key == gdk::Key::O) {
@@ -639,6 +662,9 @@ mod imp {
                         }
                     }
                     entry.set_text("");
+                    if let Some(page) = obj.imp().tab_view.selected_page() {
+                        page.child().grab_focus();
+                    }
                 }
             ));
 
@@ -739,6 +765,7 @@ impl DraftingWindow {
         );
 
         if let Some(page) = imp.tab_view.selected_page() {
+            page.child().grab_focus();
             if deselect {
                 let pages = imp.pages.borrow();
                 if let Some(d_ref) = pages.get(&page) {
@@ -1582,6 +1609,12 @@ impl DraftingWindow {
         cr.set_source_rgb(1.0, 1.0, 0.0);
         cr.move_to(220.0 + padding, 15.0 + padding);
         let _ = pangocairo::functions::show_layout(cr, &layout);
+    }
+
+    /// โฟกัสอยู่ในช่องที่รับข้อความ (ช่องคำสั่ง, spin ของ Array) หรือไม่
+    fn is_typing(&self) -> bool {
+        gtk::prelude::GtkWindowExt::focus(self)
+            .map_or(false, |w| w.is::<gtk::Editable>())
     }
 
     fn sync_snap_settings(&self) {

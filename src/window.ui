@@ -140,37 +140,37 @@
                 <child>
                   <object class="GtkButton" id="btn_select">
                     <property name="icon-name">dot-node-pointer-left-symbolic</property>
-                    <property name="tooltip-text">Select (Esc)</property>
+                    <property name="tooltip-text">Select (S, Esc)</property>
                   </object>
                 </child>
                 <child>
                   <object class="GtkButton" id="btn_line">
                     <property name="icon-name">draw-line-symbolic</property>
-                    <property name="tooltip-text">Line</property>
+                    <property name="tooltip-text">Line (L)</property>
                   </object>
                 </child>
                 <child>
                   <object class="GtkButton" id="btn_circle">
                     <property name="icon-name">draw-circle-symbolic</property>
-                    <property name="tooltip-text">Circle</property>
+                    <property name="tooltip-text">Circle (C)</property>
                   </object>
                 </child>
                 <child>
                   <object class="GtkButton" id="btn_arc">
                     <property name="icon-name">draw-arc-symbolic</property>
-                    <property name="tooltip-text">Arc (3-point)</property>
+                    <property name="tooltip-text">Arc (A, 3-point)</property>
                   </object>
                 </child>
                 <child>
                   <object class="GtkButton" id="btn_polyline">
                     <property name="icon-name">draw-polyline-symbolic</property>
-                    <property name="tooltip-text">Polyline (Enter to finish)</property>
+                    <property name="tooltip-text">Polyline (P, Enter to finish)</property>
                   </object>
                 </child>
                 <child>
                   <object class="GtkButton" id="btn_dimension">
                     <property name="icon-name">ruler-outline-horizontal-symbolic</property>
-                    <property name="tooltip-text">Dimension</property>
+                    <property name="tooltip-text">Dimension (D)</property>
                   </object>
                 </child>
                 <child>

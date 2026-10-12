@@ -86,17 +86,11 @@ cargo run
 |---|---|
 | `L` | Line tool |
 | `C` | Circle tool |
+| `A` | 3-point arc tool |
+| `P` | Polyline tool |
+| `D` | Dimension tool |
 | `S` | Select mode |
 | `Z` | Zoom to cursor |
-| `Ctrl+F` | Zoom to fit |
-| `Ctrl+O` | Open file |
-| `Ctrl+S` | Save (asks for a name if the drawing is untitled) |
-| `Ctrl+Shift+S` | Save As |
-| `Ctrl+Z` | Undo |
-| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
-| `F9` | Toggle snap |
-| `Enter` | Finish polyline |
-| `Esc` | Cancel / back to select |
 
 ## Command Bar
 
