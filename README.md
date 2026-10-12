@@ -8,7 +8,7 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 
 ## Features
 
-- Draw lines, circles, 3-point arcs, polylines and linear dimensions
+- Draw lines, circles, 3-point arcs, polylines, Offset and linear dimensions
 - Object snap: endpoint, midpoint, center, quadrant and intersection, each toggleable from the snap settings dock
 - Grid snapping with adaptive LOD grid
 - Multi-tab support, with an unsaved-changes prompt before closing
@@ -89,6 +89,7 @@ cargo run
 | `A` | 3-point arc tool |
 | `P` | Polyline tool |
 | `D` | Dimension tool |
+| `O` | Offset tool |
 | `S` | Select mode |
 | `Z` | Zoom to cursor |
 
@@ -102,6 +103,7 @@ Type commands in the command bar at the bottom:
 | `c`, `circle` | Circle tool |
 | `a`, `arc` | 3-point arc tool |
 | `pl`, `pline`, `polyline` | Polyline tool |
+| `of`, `offset`, `of [space]` | Offset tool |
 | `ar`, `array` | Rectangular array |
 | `fit` | Zoom to fit |
 | `z` | Zoom in at cursor |
