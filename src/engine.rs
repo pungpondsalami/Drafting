@@ -482,48 +482,52 @@ impl Engine {
         }
     }
 
-    pub fn select_at(&mut self, world_x: f64, world_y: f64, add_to_selection: bool) {
-        let tolerance = 5.0 / self.camera.scale;
+    /// ชิ้นงานที่เส้นอยู่ใกล้เมาส์ที่สุด (ภายใน 6px) ถ้าเท่ากันเลือกชิ้นที่วาดทีหลัง
+    fn pick_at(&self, wx: f64, wy: f64) -> Option<u64> {
+        let tol = 6.0 / self.camera.scale;
         let query_box = BoundingBox {
-            min_x: world_x - tolerance,
-            min_y: world_y - tolerance,
-            max_x: world_x + tolerance,
-            max_y: world_y + tolerance,
+            min_x: wx - tol,
+            min_y: wy - tol,
+            max_x: wx + tol,
+            max_y: wy + tol,
         };
-
         let mut hits = Vec::new();
         self.spatial_index.query(&query_box, &mut hits);
-        let top = hits.into_iter().copied().max(); // id มากสุด = วาดทีหลังสุด = อยู่บนสุด
+
+        let p = Point { x: wx, y: wy };
+        let mut best: Option<(f64, u64)> = None;
+        for id in hits.into_iter().copied() {
+            let Some(i) = self.index_of(id) else { continue };
+            let d = self.history[i].data.distance_to(p);
+            if d > tol {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((bd, bid)) => d < bd - 1e-9 || ((d - bd).abs() <= 1e-9 && id > bid),
+            };
+            if better {
+                best = Some((d, id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    pub fn select_at(&mut self, world_x: f64, world_y: f64, add_to_selection: bool) {
+        let top = self.pick_at(world_x, world_y);
 
         if !add_to_selection {
             for el in &mut self.history {
                 el.is_selected = false;
             }
         }
-
         if let Some(i) = top.and_then(|id| self.index_of(id)) {
             self.history[i].is_selected = true;
         }
     }
 
-    pub fn deselect_all(&mut self) {
-        for el in &mut self.history {
-            el.is_selected = false;
-        }
-    }
-
     pub fn hover_at(&mut self, world_x: f64, world_y: f64) {
-        let tolerance = 5.0 / self.camera.scale;
-        let query_box = BoundingBox {
-            min_x: world_x - tolerance,
-            min_y: world_y - tolerance,
-            max_x: world_x + tolerance,
-            max_y: world_y + tolerance,
-        };
-        let mut hits = Vec::new();
-        self.spatial_index.query(&query_box, &mut hits);
-        let top = hits.into_iter().copied().max();
-        self.hovered_id = top;
+        self.hovered_id = self.pick_at(world_x, world_y);
     }
 
     pub fn select_in_box(
@@ -550,18 +554,24 @@ impl Engine {
         for id in hit_ids {
             let Some(i) = self.index_of(id) else { continue };
             let el = &mut self.history[i];
-            if crossing {
-                el.is_selected = true;
+            let hit = if crossing {
+                el.data.touches_rect(&sel_box)
             } else {
                 let bb = el.bounding_box();
-                if bb.min_x >= sel_box.min_x
+                bb.min_x >= sel_box.min_x
                     && bb.max_x <= sel_box.max_x
                     && bb.min_y >= sel_box.min_y
                     && bb.max_y <= sel_box.max_y
-                {
-                    el.is_selected = true;
-                }
+            };
+            if hit {
+                el.is_selected = true;
             }
+        }
+    }
+
+    pub fn deselect_all(&mut self) {
+        for el in &mut self.history {
+            el.is_selected = false;
         }
     }
 
@@ -1398,6 +1408,118 @@ fn intersect_prims(a: &Prim, b: &Prim) -> Vec<Point> {
     }
 }
 
+fn dist_point_seg(p: Point, a: Point, b: Point) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 < 1e-18 {
+        0.0
+    } else {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+    };
+    (p.x - (a.x + t * dx)).hypot(p.y - (a.y + t * dy))
+}
+
+fn seg_hits_rect(a: Point, b: Point, r: &BoundingBox) -> bool {
+    let inside =
+        |p: Point| p.x >= r.min_x && p.x <= r.max_x && p.y >= r.min_y && p.y <= r.max_y;
+    if inside(a) || inside(b) {
+        return true;
+    }
+    let c = [
+        Point { x: r.min_x, y: r.min_y },
+        Point { x: r.max_x, y: r.min_y },
+        Point { x: r.max_x, y: r.max_y },
+        Point { x: r.min_x, y: r.max_y },
+    ];
+    (0..4).any(|i| seg_seg(a, b, c[i], c[(i + 1) % 4]).is_some())
+}
+
+fn dimension_segments(start: Point, end: Point, offset: f64) -> Vec<(Point, Point)> {
+    match linear_dimension_geometry(start, end, offset) {
+        Some(g) => vec![(g.start, g.dim_from), (g.end, g.dim_to), (g.dim_from, g.dim_to)],
+        None => vec![(start, end)],
+    }
+}
+
+impl ElementData {
+    /// ระยะจากจุดถึงเส้นจริงของชิ้นงาน (หน่วยโลก)
+    pub fn distance_to(&self, p: Point) -> f64 {
+        match self {
+            ElementData::Line { start, end } => dist_point_seg(p, *start, *end),
+            ElementData::Circle { center, radius } => {
+                ((p.x - center.x).hypot(p.y - center.y) - radius).abs()
+            }
+            ElementData::Arc { center, radius, start_angle, end_angle } => {
+                let a = (p.y - center.y).atan2(p.x - center.x);
+                if angle_in_range(a, *start_angle, *end_angle) {
+                    ((p.x - center.x).hypot(p.y - center.y) - radius).abs()
+                } else {
+                    let s = arc_point(*center, *radius, *start_angle);
+                    let e = arc_point(*center, *radius, *end_angle);
+                    (p.x - s.x).hypot(p.y - s.y).min((p.x - e.x).hypot(p.y - e.y))
+                }
+            }
+            ElementData::Polyline { points, closed } => {
+                let n = points.len();
+                if n == 1 {
+                    return (p.x - points[0].x).hypot(p.y - points[0].y);
+                }
+                let segs = if *closed { n } else { n.saturating_sub(1) };
+                (0..segs)
+                    .map(|i| dist_point_seg(p, points[i], points[(i + 1) % n]))
+                    .fold(f64::MAX, f64::min)
+            }
+            ElementData::Dimension { start, end, offset } => dimension_segments(*start, *end, *offset)
+                .into_iter()
+                .map(|(a, b)| dist_point_seg(p, a, b))
+                .fold(f64::MAX, f64::min),
+        }
+    }
+
+    /// สำหรับ crossing select: ส่วนใดส่วนหนึ่งของเส้นอยู่ในกรอบหรือไม่
+    pub fn touches_rect(&self, r: &BoundingBox) -> bool {
+        match self {
+            ElementData::Line { start, end } => seg_hits_rect(*start, *end, r),
+            ElementData::Circle { center, radius } => {
+                let nx = center.x.clamp(r.min_x, r.max_x);
+                let ny = center.y.clamp(r.min_y, r.max_y);
+                let dmin = (center.x - nx).hypot(center.y - ny);
+                let dmax = [
+                    (r.min_x, r.min_y),
+                    (r.max_x, r.min_y),
+                    (r.max_x, r.max_y),
+                    (r.min_x, r.max_y),
+                ]
+                .iter()
+                .map(|(x, y)| (center.x - x).hypot(center.y - y))
+                .fold(0.0, f64::max);
+                dmin <= *radius && *radius <= dmax
+            }
+            ElementData::Arc { center, radius, start_angle, end_angle } => {
+                const N: usize = 128;
+                let pts: Vec<Point> = (0..=N)
+                    .map(|i| {
+                        let a = start_angle + (end_angle - start_angle) * i as f64 / N as f64;
+                        arc_point(*center, *radius, a)
+                    })
+                    .collect();
+                pts.windows(2).any(|w| seg_hits_rect(w[0], w[1], r))
+            }
+            ElementData::Polyline { points, closed } => {
+                let n = points.len();
+                if n == 1 {
+                    return seg_hits_rect(points[0], points[0], r);
+                }
+                let segs = if *closed { n } else { n.saturating_sub(1) };
+                (0..segs).any(|i| seg_hits_rect(points[i], points[(i + 1) % n], r))
+            }
+            ElementData::Dimension { start, end, offset } => dimension_segments(*start, *end, *offset)
+                .into_iter()
+                .any(|(a, b)| seg_hits_rect(a, b, r)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1421,3 +1543,4 @@ mod tests {
         println!("--- Test Passed! Engine is UI-Independent ---\n");
     }
 }
+
