@@ -8,12 +8,13 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 
 ## Features
 
-- Draw lines, circles, 3-point arcs, polylines, Offset and linear dimensions
+- Draw lines, circles, 3-point arcs, polylines and linear dimensions
 - Object snap: endpoint, midpoint, center, quadrant and intersection, each toggleable from the snap settings dock
 - Grid snapping with adaptive LOD grid
+- Offset (line, circle, arc, polyline) with preview
 - Multi-tab support, with an unsaved-changes prompt before closing
 - Open, Save and Save As for DXF files (the file path is remembered per tab)
-- Rectangular array with animated preview
+- Rectangular array with preview
 - Multi-select with window/crossing selection (AutoCAD-style)
 - Move tool with snap
 - Undo / Redo
