@@ -38,6 +38,18 @@ glib::wrapper! {
         @implements gio::ActionGroup, gio::ActionMap, gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Native, gtk::Root, gtk::ShortcutManager;
 }
 
+const OFFSET_ANIM_SECS: f64 = 0.12;
+const OFFSET_FLIP_SECS: f64 = 0.04;
+
+#[derive(Debug, Clone, Copy)]
+pub struct OffsetAnim {
+    pub source: u64,
+    pub side: (f64, f64),
+    pub dist: f64,
+    pub start_us: Option<i64>,
+    pub t: f64, // 0.0 → 1.0
+}
+
 mod imp {
     use super::*;
     use gtk::CompositeTemplate;
@@ -107,6 +119,16 @@ mod imp {
         pub btn_polyline: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_select: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_offset: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub spin_offset_dist: TemplateChild<gtk::SpinButton>,
+        #[template_child]
+        pub btn_offset_done: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub revealer_offset_ui: TemplateChild<gtk::Revealer>,
+        #[template_child]
+        pub btn_offset_cancel: TemplateChild<gtk::Button>,
 
         pub current_mode: Cell<crate::engine::ToolMode>,
         pub mouse_pos: Cell<(f64, f64)>,
@@ -131,6 +153,12 @@ mod imp {
         pub offset_distance: Cell<f64>,
         pub offset_source: Cell<Option<u64>>,
         pub offset_msg: RefCell<String>,
+        pub offset_anim: RefCell<Option<OffsetAnim>>,
+        pub offset_fade: Cell<f64>,
+        pub last_frame_us: Cell<i64>,
+        pub offset_stable: Cell<Option<(f64, f64)>>, // จุดที่ใช้ตัดสินฝั่งของ ghost ตอนนี้
+        pub offset_k: Cell<f64>,                     // ตัวคูณระยะ 0..1 (1 = เต็ม)
+        pub offset_phase: Cell<u8>,                  // 0 นิ่ง, 1 กำลังหด, 2 กำลังงอก
     }
 
     #[glib::object_subclass]
@@ -172,6 +200,7 @@ mod imp {
             self.btn_snap.set_active(true);
             self.current_mode.set(DrawingMode::Select);
             self.auto_pan_enabled.set(true);
+            self.offset_distance.set(self.spin_offset_dist.value());
 
             // สร้าง Controller สำหรับดักคีย์บอร์ดระดับ Window
             let key_ctrl = gtk::EventControllerKey::new();
@@ -597,6 +626,55 @@ mod imp {
                 move |_| obj.set_tool(DrawingMode::Polyline)
             ));
 
+            self.btn_offset.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    obj.set_tool(DrawingMode::Offset);
+                    glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(120),
+                        glib::clone!(
+                            #[weak]
+                            obj,
+                            move || {
+                                if obj.imp().current_mode.get() == DrawingMode::Offset {
+                                    obj.imp().spin_offset_dist.grab_focus();
+                                }
+                            }
+                        ),
+                    );
+                }
+            ));
+
+            self.btn_offset_cancel.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.cancel_action(true) // ออก + ยกเลิกการเลือก
+            ));
+
+            self.spin_offset_dist.connect_value_changed(glib::clone!(
+                #[weak]
+                obj,
+                move |spin| obj.set_offset_distance(spin.value())
+            ));
+
+            // Enter ในช่องกรอก → คืนโฟกัสให้ canvas
+            self.spin_offset_dist.connect_activate(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    if let Some(page) = obj.imp().tab_view.selected_page() {
+                        page.child().grab_focus();
+                    }
+                }
+            ));
+
+            self.btn_offset_done.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.cancel_action(false)
+            ));
+
             self.cmd_entry.connect_activate(glib::clone!(
                 #[weak]
                 obj,
@@ -743,10 +821,16 @@ impl DraftingWindow {
         imp.dimension_step.set(0);
         imp.pending_points.borrow_mut().clear();
         imp.offset_source.set(None);
+        *imp.offset_anim.borrow_mut() = None;
+        imp.offset_stable.set(None);
+        imp.offset_k.set(1.0);
+        imp.offset_phase.set(0);
+        imp.offset_fade.set(0.0);
         imp.offset_msg.borrow_mut().clear();
         if let Some(page) = imp.tab_view.selected_page() {
             page.child().queue_draw();
         }
+        self.sync_tool_buttons();
     }
 
     pub fn set_offset_distance(&self, v: f64) {
@@ -754,6 +838,9 @@ impl DraftingWindow {
         if v > 0.0 {
             imp.offset_distance.set(v);
             imp.offset_msg.borrow_mut().clear();
+            if (imp.spin_offset_dist.value() - v).abs() > 1e-9 {
+                imp.spin_offset_dist.set_value(v); // จากช่องคำสั่ง `of 25`
+            }
         } else {
             *imp.offset_msg.borrow_mut() = "Distance must be greater than 0".into();
         }
@@ -771,7 +858,47 @@ impl DraftingWindow {
         }
         imp.synced_mode.set(Some(mode));
 
-        let buttons: [(&gtk::Button, DrawingMode); 7] = [
+        let offset_page_shown =
+            imp.right_dock.visible_child_name().as_deref() == Some("offset_settings");
+
+        if mode == DrawingMode::Offset {
+            imp.right_dock.set_visible_child_name("offset_settings");
+            glib::timeout_add_local_once(
+                std::time::Duration::from_millis(50),
+                glib::clone!(
+                    #[weak(rename_to = obj)]
+                    self,
+                    move || {
+                        if obj.imp().current_mode.get() == DrawingMode::Offset {
+                            obj.imp().revealer_offset_ui.set_reveal_child(true);
+                        }
+                    }
+                ),
+            );
+        } else {
+            // เลื่อนออกก่อน แล้วค่อยสลับ stack กลับ (เหมือน Array)
+            imp.revealer_offset_ui.set_reveal_child(false);
+            if offset_page_shown {
+                glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(300),
+                    glib::clone!(
+                        #[weak(rename_to = obj)]
+                        self,
+                        move || {
+                            let imp = obj.imp();
+                            if imp.current_mode.get() != DrawingMode::Offset
+                                && imp.right_dock.visible_child_name().as_deref()
+                                    == Some("offset_settings")
+                            {
+                                imp.right_dock.set_visible_child_name("default");
+                            }
+                        }
+                    ),
+                );
+            }
+        }
+
+        let buttons: [(&gtk::Button, DrawingMode); 8] = [
             (&imp.btn_select, DrawingMode::Select),
             (&imp.btn_line, DrawingMode::Line),
             (&imp.btn_circle, DrawingMode::Circle),
@@ -779,7 +906,9 @@ impl DraftingWindow {
             (&imp.btn_polyline, DrawingMode::Polyline),
             (&imp.btn_dimension, DrawingMode::Dimension),
             (&imp.btn_array, DrawingMode::Array),
+            (&imp.btn_offset, DrawingMode::Offset),
         ];
+
         for (btn, m) in buttons {
             // ระหว่างลากย้าย (Move) ถือว่ายังอยู่ใน Select
             let active = m == mode || (m == DrawingMode::Select && mode == DrawingMode::Move);
@@ -797,6 +926,8 @@ impl DraftingWindow {
         imp.start_pos.set(None);
         imp.pending_points.borrow_mut().clear();
         imp.offset_source.set(None);
+        *imp.offset_anim.borrow_mut() = None;
+        imp.offset_fade.set(0.0);
         imp.offset_msg.borrow_mut().clear();
         imp.dimension_step.set(0);
         imp.dim_temp_start.set(None);
@@ -915,10 +1046,91 @@ impl DraftingWindow {
                         area.queue_draw();
                     }
 
-                    // ถ้า cancel animation จบแล้ว ค่อยเปลี่ยน mode
-                    if obj.imp().is_cancelling_array.get() && d.array_settings.anim_scale < 0.01 {
-                        obj.imp().is_cancelling_array.set(false);
-                        obj.imp().current_mode.set(DrawingMode::Select);
+                    let anim_copy = *obj.imp().offset_anim.borrow();
+                    if let Some(mut a) = anim_copy {
+                        let now = clock.frame_time();
+                        let start = a.start_us.unwrap_or(now);
+                        a.start_us = Some(start);
+                        a.t = ((now - start) as f64 / 1_000_000.0 / OFFSET_ANIM_SECS).min(1.0);
+                        const OFFSET_FLIP_SECS: f64 = 0.09;
+
+                        if a.t >= 1.0 {
+                            let side = Point { x: a.side.0, y: a.side.1 };
+                            match d.offset_apply(a.source, side, a.dist) {
+                                Ok(()) => {
+                                    d.deselect_all();
+                                    obj.imp().offset_source.set(None);
+                                    obj.imp().offset_msg.borrow_mut().clear();
+                                    obj.imp().offset_fade.set(0.0);
+                                }
+                                Err(msg) => *obj.imp().offset_msg.borrow_mut() = msg.into(),
+                            }
+                            *obj.imp().offset_anim.borrow_mut() = None;
+                        } else {
+                            *obj.imp().offset_anim.borrow_mut() = Some(a);
+                        }
+                        area.queue_draw();
+                    }
+
+                    let imp = obj.imp();
+                    let active = imp.tab_view.selected_page().as_ref() == Some(&page)
+                        && imp.current_mode.get() == DrawingMode::Offset
+                        && imp.offset_anim.borrow().is_none();
+                    match (active, imp.offset_source.get()) {
+                        (true, Some(id)) => {
+                            let now = clock.frame_time();
+                            let last = imp.last_frame_us.replace(now);
+                            let dt = if last == 0 { 0.016 } else { ((now - last) as f64 / 1e6).min(0.1) };
+
+                            let (mx, my) = imp.mouse_pos.get();
+                            let target = d.camera.screen_to_world(mx, my);
+                            let dist = imp.offset_distance.get();
+                            let mut stable = imp.offset_stable.get().unwrap_or(target);
+
+                            // ฝั่งของเมาส์ตอนนี้ต่างจากฝั่งที่ ghost แสดงอยู่ไหม
+                            let differs = dist > 0.0 && {
+                                let a = d.offset_preview(id, Point { x: stable.0, y: stable.1 }, dist);
+                                let b = d.offset_preview(id, Point { x: target.0, y: target.1 }, dist);
+                                format!("{:?}", a) != format!("{:?}", b)
+                            };
+
+                            let mut k = imp.offset_k.get();
+                            let mut phase = imp.offset_phase.get();
+                            if differs && phase != 1 {
+                                phase = 1;
+                            }
+                            match phase {
+                                1 => {
+                                    k -= dt / OFFSET_FLIP_SECS;
+                                    if k <= 0.0 {
+                                        k = 0.0;
+                                        stable = target; // สลับฝั่งตอนหดจนสุด
+                                        phase = 2;
+                                    }
+                                }
+                                2 => {
+                                    k += dt / OFFSET_FLIP_SECS;
+                                    if k >= 1.0 {
+                                        k = 1.0;
+                                        phase = 0;
+                                    }
+                                    if !differs {
+                                        stable = target;
+                                    }
+                                }
+                                _ => {
+                                    if !differs {
+                                        stable = target;
+                                    }
+                                }
+                            }
+                            imp.offset_stable.set(Some(stable));
+                            imp.offset_k.set(k);
+                            imp.offset_phase.set(phase);
+                            imp.offset_fade.set((imp.offset_fade.get() + dt / 0.12).min(1.0));
+                            area.queue_draw();
+                        }
+                        _ => imp.last_frame_us.set(0),
                     }
                 }
                 glib::ControlFlow::Continue
@@ -1188,17 +1400,25 @@ impl DraftingWindow {
                             if dist <= 0.0 {
                                 *imp.offset_msg.borrow_mut() =
                                     "Type a distance in the command bar first".into();
+                            } else if imp.offset_anim.borrow().is_some() {
+                                // กำลังเล่นอนิเมชัน ไม่รับคลิก
                             } else if let Some(id) = imp.offset_source.get() {
-                                match d.offset_apply(id, Point { x: wx, y: wy }, dist) {
-                                    Ok(()) => {
-                                        d.deselect_all();
-                                        imp.offset_source.set(None);
-                                        imp.offset_msg.borrow_mut().clear();
-                                    }
-                                    Err(msg) => *imp.offset_msg.borrow_mut() = msg.into(),
+                                let side = Point { x: wx, y: wy };
+                                if d.offset_preview(id, side, dist).is_some() {
+                                    *imp.offset_anim.borrow_mut() = Some(OffsetAnim {
+                                        source: id,
+                                        side: (wx, wy),
+                                        dist,
+                                        start_us: None,
+                                        t: 0.0,
+                                    });
+                                    imp.offset_msg.borrow_mut().clear();
+                                } else if let Err(msg) = d.offset_apply(id, side, dist) {
+                                    *imp.offset_msg.borrow_mut() = msg.into();
                                 }
                             } else if let Some(id) = d.offset_pick(wx, wy) {
                                 imp.offset_source.set(Some(id));
+                                imp.offset_fade.set(0.0);
                                 imp.offset_msg.borrow_mut().clear();
                             }
                         }
@@ -1577,11 +1797,32 @@ impl DraftingWindow {
 
         // --- Offset preview ---
         if imp.current_mode.get() == DrawingMode::Offset {
-            if let Some(id) = imp.offset_source.get() {
-                let dist = imp.offset_distance.get();
-                if let Some(data) = d.offset_preview(id, Point { x: wx, y: wy }, dist) {
+            let anim = *imp.offset_anim.borrow();
+            let (src, side, dist) = match anim {
+                Some(a) => (
+                    Some(a.source),
+                    Point { x: a.side.0, y: a.side.1 },
+                    a.dist, // ระยะเต็ม ไม่ขยายจาก 0 แล้ว
+                ),
+                None => {
+                    let k = imp.offset_k.get();
+                    let e = k * k * (3.0 - 2.0 * k); // smoothstep
+                    let s = imp.offset_stable.get().unwrap_or((wx, wy));
+                    (
+                        imp.offset_source.get(),
+                        Point { x: s.0, y: s.1 },
+                        (imp.offset_distance.get() * e).max(1e-6),
+                    )
+                }
+            };
+
+            let alpha = if anim.is_some() { 1.0 } else { imp.offset_fade.get() };
+
+            if let Some(id) = src {
+                if let Some(data) = d.offset_preview(id, side, dist) {
                     cr.new_path();
-                    cr.set_source_rgba(1.0, 0.5, 0.0, 0.8);
+                    let c = anim.map_or(0.0, |a| 1.0 - (1.0 - a.t).powi(3)); // 0 → 1 ตอนวาง
+                    cr.set_source_rgba(1.0, 0.5 + 0.5 * c, c, 0.8 * alpha + 0.2 * c);
                     cr.set_line_width(1.5);
                     match data {
                         ElementData::Line { start, end } => {

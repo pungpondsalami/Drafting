@@ -313,6 +313,98 @@
                             <property name="tooltip-text">Array</property>
                           </object>
                         </child>
+                        <child>
+                          <object class="GtkButton" id="btn_offset">
+                            <property name="icon-name">outline-offset-symbolic</property>
+                            <property name="tooltip-text">Offset (O, or type: of 10)</property>
+                          </object>
+                        </child>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkStackPage">
+                    <property name="name">offset_settings</property>
+                    <property name="child">
+                      <object class="GtkRevealer" id="revealer_offset_ui">
+                        <property name="margin-end">12</property>
+                        <property name="transition-type">slide-left</property>
+                        <property name="transition-duration">300</property>
+                        <property name="reveal-child">false</property>
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="spacing">10</property>
+                            <property name="margin-start">12</property>
+                            <property name="margin-end">12</property>
+                            <property name="margin-top">12</property>
+                            <property name="margin-bottom">12</property>
+                            <style>
+                              <class name="osd"/>
+                              <class name="toolbar"/>
+                              <class name="drafting-floating"/>
+                            </style>
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="label">Offset</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSeparator"/>
+                            </child>
+                            <child>
+                              <object class="GtkBox">
+                                <property name="spacing">10</property>
+                                <child>
+                                  <object class="GtkLabel">
+                                    <property name="label">Distance :</property>
+                                    <property name="halign">start</property>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="GtkSpinButton" id="spin_offset_dist">
+                                    <property name="width-request">110</property>
+                                    <property name="digits">3</property>
+                                    <property name="adjustment">
+                                      <object class="GtkAdjustment">
+                                        <property name="lower">0.001</property>
+                                        <property name="upper">100000</property>
+                                        <property name="value">10</property>
+                                        <property name="step-increment">1</property>
+                                        <property name="page-increment">10</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">8</property>
+                                <child>
+                                  <object class="GtkButton" id="btn_offset_done">
+                                    <property name="label">Done</property>
+                                    <property name="hexpand">true</property>
+                                    <property name="tooltip-text">Exit Offset (Esc)</property>
+                                    <style>
+                                      <class name="suggested-action"/>
+                                      <class name="drafting-apply-array"/>
+                                    </style>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="GtkButton" id="btn_offset_cancel">
+                                    <property name="icon-name">window-close-symbolic</property>
+                                    <property name="tooltip-text">Cancel and deselect</property>
+                                    <style><class name="destructive-action"/></style>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
                       </object>
                     </property>
                   </object>
@@ -343,6 +435,9 @@
                               <object class="GtkLabel">
                                 <property name="label">Rectangular Array</property>
                               </object>
+                            </child>
+                            <child>
+                              <object class="GtkSeparator"/>
                             </child>
                             <child>
                               <object class="GtkGrid">
@@ -469,10 +564,8 @@
                 </child>
               </object>
             </child>
-
           </object>
         </child>
-
       </object>
     </property>
   </template>

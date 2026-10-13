@@ -19,6 +19,7 @@
     <file>icons/draw-arc-symbolic.svg</file>
     <file>icons/draw-polyline-symbolic.svg</file>
     <file>icons/dot-node-pointer-left-symbolic.svg</file>
+    <file>icons/outline-offset-symbolic.svg</file>
   </gresource>
 </gresources>
 
