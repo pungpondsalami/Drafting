@@ -2152,113 +2152,82 @@ impl DraftingWindow {
     }
 
     pub fn open_path(&self, path: PathBuf) {
-        let drawing = match dxf::Drawing::load_file(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Error opening {:?}: {}", path, e);
-                return;
-            }
-        };
+        let obj = self.clone();
+        glib::spawn_future_local(async move {
+            let title = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Untitled".to_string());
 
-        let title = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Untitled".to_string());
-        self.create_new_tab(&title); // เลือก tab ใหม่ให้อัตโนมัติ
-        let Some(page) = self.imp().tab_view.selected_page() else { return };
+            // อ่านไฟล์ใน thread แยก หน้าต่างจะไม่ค้าง
+            let p = path.clone();
+            let result = gio::spawn_blocking(move || {
+                acadrust::DxfReader::from_file(&p)
+                    .and_then(|r| r.read())
+                    .map(|d| dxf_to_elements(&d))
+                    .map_err(|e| e.to_string())
+            })
+            .await;
 
-        let mut skipped = 0; {
-            let pages = self.imp().pages.borrow();
-            let Some(d_ref) = pages.get(&page) else { return };
-            let mut d = d_ref.borrow_mut();
-
-            for entity in drawing.entities() {
-                match &entity.specific {
-                    dxf::entities::EntityType::Line(l) => {
-                        let id = d.get_next_id();
-                        d.add_element(DrawingElement {
-                            id,
-                            is_selected: false,
-                            data: ElementData::Line {
-                                start: Point { x: l.p1.x, y: l.p1.y },
-                                end: Point { x: l.p2.x, y: l.p2.y },
-                            },
-                        });
-                    }
-                    dxf::entities::EntityType::Circle(c) => {
-                        let id = d.get_next_id();
-                        d.add_element(DrawingElement {
-                            id,
-                            is_selected: false,
-                            data: ElementData::Circle {
-                                center: Point { x: c.center.x, y: c.center.y },
-                                radius: c.radius,
-                            },
-                        });
-                    }
-                    dxf::entities::EntityType::Arc(a) => {
-                        let s = a.start_angle.to_radians();
-                        let mut e = a.end_angle.to_radians();
-                        while e <= s {
-                            e += std::f64::consts::TAU;
-                        }
-                        let id = d.get_next_id();
-                        d.add_element(DrawingElement {
-                            id,
-                            is_selected: false,
-                            data: ElementData::Arc {
-                                center: Point { x: a.center.x, y: a.center.y },
-                                radius: a.radius,
-                                start_angle: s,
-                                end_angle: e,
-                            },
-                        });
-                    }
-                    dxf::entities::EntityType::LwPolyline(lw) => {
-                        if lw.vertices.len() >= 2 {
-                            if lw.vertices.iter().any(|v| v.bulge != 0.0) {
-                                eprintln!("LwPolyline has bulge segments; loaded as straight lines");
-                            }
-                            let points = lw.vertices.iter().map(|v| Point { x: v.x, y: v.y }).collect();
-                            let id = d.get_next_id();
-                            d.add_element(DrawingElement {
-                                id,
-                                is_selected: false,
-                                data: ElementData::Polyline {
-                                    points,
-                                    closed: lw.flags & 1 != 0,
-                                },
-                            });
-                        }
-                    }
-                    _ => skipped += 1,
+            let (elements, skipped) = match result {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    eprintln!("Error opening {:?}: {}", path, e);
+                    obj.show_error("Can't open file", &format!("{}\n\n{}", title, e));
+                    return;
                 }
-            }
-            d.file_path = Some(path.clone());
-            d.dirty = false;
-        }
-        if skipped > 0 {
-            eprintln!("Skipped {} unsupported entities", skipped);
-        }
-
-        // รอให้ canvas มีขนาดก่อนค่อย zoom to fit
-        glib::timeout_add_local_once(
-            std::time::Duration::from_millis(100),
-            glib::clone!(
-                #[weak(rename_to = obj)]
-                self,
-                #[weak]
-                page,
-                move || {
-                    let pages = obj.imp().pages.borrow();
-                    if let Some(d_ref) = pages.get(&page) {
-                        let (w, h) = (page.child().width() as f64, page.child().height() as f64);
-                        d_ref.borrow_mut().zoom_to_fit(w, h);
-                    }
-                    page.child().queue_draw();
+                Err(_) => {
+                    obj.show_error(
+                        "Can't open file",
+                        &format!("{}\n\nThe DXF reader failed on this file.", title),
+                    );
+                    return;
                 }
-            ),
-        );
+            };
+
+            obj.create_new_tab(&title);
+            let Some(page) = obj.imp().tab_view.selected_page() else { return };
+            {
+                let pages = obj.imp().pages.borrow();
+                let Some(d_ref) = pages.get(&page) else { return };
+                let mut d = d_ref.borrow_mut();
+                for data in elements {
+                    let id = d.get_next_id();
+                    d.add_element(DrawingElement { id, is_selected: false, data });
+                }
+                d.file_path = Some(path.clone());
+                d.dirty = false;
+            }
+            if skipped > 0 {
+                eprintln!("Skipped {} unsupported entities", skipped);
+            }
+
+            glib::timeout_add_local_once(
+                std::time::Duration::from_millis(100),
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    #[weak]
+                    page,
+                    move || {
+                        let pages = obj.imp().pages.borrow();
+                        if let Some(d_ref) = pages.get(&page) {
+                            let (w, h) = (page.child().width() as f64, page.child().height() as f64);
+                            d_ref.borrow_mut().zoom_to_fit(w, h);
+                        }
+                        page.child().queue_draw();
+                    }
+                ),
+            );
+        });
+    }
+
+    fn show_error(&self, heading: &str, body: &str) {
+        let dialog = adw::AlertDialog::new(Some(heading), Some(body));
+        dialog.add_responses(&[("ok", "_OK")]);
+        dialog.set_default_response(Some("ok"));
+        dialog.set_close_response("ok");
+        dialog.present(Some(self));
     }
 
     fn confirm_close_page(&self, page: &adw::TabPage) {
@@ -2336,6 +2305,54 @@ fn dxf_filters() -> (gtk::FileFilter, gio::ListStore, gtk::FileFilter) {
     let list = gio::ListStore::new::<gtk::FileFilter>();
     list.append(&f);
     (f.clone(), list, f)
+}
+
+fn dxf_to_elements(doc: &acadrust::CadDocument) -> (Vec<ElementData>, usize) {
+    use acadrust::EntityType;
+    let mut out = Vec::new();
+    let mut skipped = 0usize;
+
+    // model_space_entities
+    for e in doc.model_space_entities() {
+        match e {
+            EntityType::Line(l) => out.push(ElementData::Line {
+                start: Point { x: l.start.x, y: l.start.y },
+                end: Point { x: l.end.x, y: l.end.y },
+            }),
+            EntityType::Circle(c) => out.push(ElementData::Circle {
+                center: Point { x: c.center.x, y: c.center.y },
+                radius: c.radius,
+            }),
+            EntityType::Arc(a) => {
+                let s = a.start_angle;
+                let mut en = a.end_angle;
+                while en <= s {
+                    en += std::f64::consts::TAU;
+                }
+                out.push(ElementData::Arc {
+                    center: Point { x: a.center.x, y: a.center.y },
+                    radius: a.radius,
+                    start_angle: s,
+                    end_angle: en,
+                });
+            }
+            EntityType::LwPolyline(p) if p.vertices.len() >= 2 => {
+                if p.vertices.iter().any(|v| v.bulge != 0.0) {
+                    eprintln!("LwPolyline has bulge; drawn as straight segments");
+                }
+                out.push(ElementData::Polyline {
+                    points: p
+                        .vertices
+                        .iter()
+                        .map(|v| Point { x: v.location.x, y: v.location.y })
+                        .collect(),
+                    closed: p.is_closed,
+                });
+            }
+            _ => skipped += 1,
+        }
+    }
+    (out, skipped)
 }
 
 fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> {
