@@ -295,6 +295,8 @@ mod imp {
                             gdk::Key::p | gdk::Key::P => Some(DrawingMode::Polyline),
                             gdk::Key::d | gdk::Key::D => Some(DrawingMode::Dimension),
                             gdk::Key::o | gdk::Key::O => Some(DrawingMode::Offset),
+                            gdk::Key::t | gdk::Key::T => Some(DrawingMode::Trim),
+                            gdk::Key::e | gdk::Key::E => Some(DrawingMode::Extend),
                             _ => None,
                         };
                         if let Some(mode) = tool {
@@ -740,6 +742,8 @@ mod imp {
                             "o" | "open" => obj.show_open_dialog(),
                             "a" | "arc" => obj.set_tool(DrawingMode::Arc),
                             "pl" | "pline" | "polyline" => obj.set_tool(DrawingMode::Polyline),
+                            "tr" | "trim" => obj.set_tool(DrawingMode::Trim),
+                            "ex" | "extend" => obj.set_tool(DrawingMode::Extend),
                             "ar" | "array" => {
                                 let imp = obj.imp();
                                 if let Some(page) = imp.tab_view.selected_page() {
@@ -1255,7 +1259,6 @@ impl DraftingWindow {
                             }
                         }
 
-                        // ในส่วน match imp.current_mode.get()
                         DrawingMode::Array => {
                             // แปลงพิกัดเมาส์ (x, y) จากหน้าจอเป็นพิกัดโลก (world) ก่อนใช้
                             let (world_x, world_y) = d.camera.screen_to_world(x, y);
@@ -1420,6 +1423,18 @@ impl DraftingWindow {
                                 imp.offset_source.set(Some(id));
                                 imp.offset_fade.set(0.0);
                                 imp.offset_msg.borrow_mut().clear();
+                            }
+                        }
+
+                        DrawingMode::Trim | DrawingMode::Extend => {
+                            let r = if imp.current_mode.get() == DrawingMode::Trim {
+                                d.trim_at(wx, wy)
+                            } else {
+                                d.extend_at(wx, wy)
+                            };
+                            match r {
+                                Ok(()) => imp.offset_msg.borrow_mut().clear(),
+                                Err(m) => *imp.offset_msg.borrow_mut() = m.into(),
                             }
                         }
 
@@ -1667,6 +1682,8 @@ impl DraftingWindow {
                 DrawingMode::Array => {}
                 DrawingMode::Move => {}
                 DrawingMode::Arc | DrawingMode::Polyline | DrawingMode::Offset => {}
+                DrawingMode::Trim => {}
+                DrawingMode::Extend => {}
 
                 // --- Dimension ---
                 DrawingMode::Dimension => {
@@ -1938,6 +1955,8 @@ impl DraftingWindow {
             DrawingMode::Arc => "ARC (3-POINT)",
             DrawingMode::Polyline => "POLYLINE",
             DrawingMode::Offset => "OFFSET",
+            DrawingMode::Trim => "TRIM",
+            DrawingMode::Extend => "EXTEND",
         };
 
         let offset_hint = if imp.current_mode.get() == DrawingMode::Offset {
@@ -1949,6 +1968,14 @@ impl DraftingWindow {
                 format!("d={} | pick object", dist)
             } else {
                 format!("d={} | click side", dist)
+            };
+            if msg.is_empty() { format!("  {}", step) } else { format!("  {} | {}", step, msg) }
+        } else if matches!(imp.current_mode.get(), DrawingMode::Trim | DrawingMode::Extend) {
+            let msg = imp.offset_msg.borrow();
+            let step = if imp.current_mode.get() == DrawingMode::Trim {
+                "click the part to remove"
+            } else {
+                "click near the end to extend"
             };
             if msg.is_empty() { format!("  {}", step) } else { format!("  {} | {}", step, msg) }
         } else {
@@ -2297,6 +2324,29 @@ impl DraftingWindow {
     }
 }
 
+/// bulge = tan(มุมโค้ง/4), บวก = ทวนเข็ม (CCW) จาก p1 ไป p2
+fn bulge_segment(p1: Point, p2: Point, bulge: f64) -> ElementData {
+    let (dx, dy) = (p2.x - p1.x, p2.y - p1.y);
+    let c = dx.hypot(dy);
+    if bulge.abs() < 1e-9 || c < 1e-12 {
+        return ElementData::Line { start: p1, end: p2 };
+    }
+    let (lx, ly) = (-dy / c, dx / c); // เวกเตอร์ซ้ายของคอร์ด
+    let k = (c / 2.0) * (1.0 - bulge * bulge) / (2.0 * bulge);
+    let center = Point {
+        x: (p1.x + p2.x) / 2.0 + lx * k,
+        y: (p1.y + p2.y) / 2.0 + ly * k,
+    };
+    let radius = c * (1.0 + bulge * bulge) / (4.0 * bulge.abs());
+    let a1 = (p1.y - center.y).atan2(p1.x - center.x);
+    let a2 = (p2.y - center.y).atan2(p2.x - center.x);
+    let (s, mut e) = if bulge > 0.0 { (a1, a2) } else { (a2, a1) };
+    while e <= s {
+        e += std::f64::consts::TAU;
+    }
+    ElementData::Arc { center, radius, start_angle: s, end_angle: e }
+}
+
 fn dxf_filters() -> (gtk::FileFilter, gio::ListStore, gtk::FileFilter) {
     let f = gtk::FileFilter::new();
     f.set_name(Some("DXF Drawing (*.dxf)"));
@@ -2337,17 +2387,18 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> (Vec<ElementData>, usize) {
                 });
             }
             EntityType::LwPolyline(p) if p.vertices.len() >= 2 => {
-                if p.vertices.iter().any(|v| v.bulge != 0.0) {
-                    eprintln!("LwPolyline has bulge; drawn as straight segments");
+                let pts: Vec<Point> = p.vertices.iter()
+                    .map(|v| Point { x: v.location.x, y: v.location.y })
+                    .collect();
+                if p.vertices.iter().any(|v| v.bulge.abs() > 1e-9) {
+                    let n = pts.len();
+                    let segs = if p.is_closed { n } else { n - 1 };
+                    for i in 0..segs {
+                        out.push(bulge_segment(pts[i], pts[(i + 1) % n], p.vertices[i].bulge));
+                    }
+                } else {
+                    out.push(ElementData::Polyline { points: pts, closed: p.is_closed });
                 }
-                out.push(ElementData::Polyline {
-                    points: p
-                        .vertices
-                        .iter()
-                        .map(|v| Point { x: v.location.x, y: v.location.y })
-                        .collect(),
-                    closed: p.is_closed,
-                });
             }
             _ => skipped += 1,
         }

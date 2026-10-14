@@ -58,6 +58,8 @@ pub enum ToolMode {
     Arc,
     Polyline,
     Offset,
+    Trim,
+    Extend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -556,6 +558,42 @@ impl Engine {
         self.checkpoint();
         let new_id = self.get_next_id();
         self.add_element(DrawingElement { id: new_id, is_selected: false, data });
+        Ok(())
+    }
+
+    fn other_prims(&self, skip_id: u64) -> Vec<Prim> {
+        self.history.iter().filter(|e| e.id != skip_id).flat_map(|e| prims(&e.data)).collect()
+    }
+
+    /// คลิกส่วนที่จะตัดทิ้ง (เส้นตัด = วัตถุอื่นทั้งหมด)
+    pub fn trim_at(&mut self, wx: f64, wy: f64) -> Result<(), &'static str> {
+        let id = self.pick_at(wx, wy).ok_or("Click on an object to trim")?;
+        let i = self.index_of(id).ok_or("Object no longer exists")?;
+        let cutters = self.other_prims(id);
+        let pieces = trim_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters)?;
+        self.checkpoint();
+        self.history.remove(i);
+        for data in pieces {
+            let nid = self.get_next_id();
+            self.history.push(DrawingElement { id: nid, is_selected: false, data });
+        }
+        self.rebuild_index();
+        Ok(())
+    }
+
+    /// คลิกใกล้ปลายที่จะยืดไปชนเส้นขอบ
+    pub fn extend_at(&mut self, wx: f64, wy: f64) -> Result<(), &'static str> {
+        let id = self.pick_at(wx, wy).ok_or("Click on an object to extend")?;
+        let i = self.index_of(id).ok_or("Object no longer exists")?;
+        let diag = self
+            .get_elements_bounds()
+            .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
+            .unwrap_or(0.0);
+        let cutters = self.other_prims(id);
+        let new = extend_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters, diag * 4.0 + 1000.0)?;
+        self.checkpoint();
+        self.history[i].data = new;
+        self.rebuild_index();
         Ok(())
     }
 
@@ -1677,6 +1715,189 @@ impl ElementData {
                 .into_iter()
                 .any(|(a, b)| seg_hits_rect(a, b, r)),
         }
+    }
+}
+
+const TRIM_EPS: f64 = 1e-9;
+
+/// ตัดส่วนของ `data` ที่ click ชี้อยู่ ระหว่างเส้นตัด (cutters) คืนชิ้นที่เหลือ
+fn trim_data(
+    data: &ElementData,
+    click: Point,
+    cutters: &[Prim],
+) -> Result<Vec<ElementData>, &'static str> {
+    const NO_EDGE: &str = "No cutting edge crosses this part";
+    match data {
+        ElementData::Line { start, end } => {
+            let (dx, dy) = (end.x - start.x, end.y - start.y);
+            let len2 = dx * dx + dy * dy;
+            if len2 < 1e-18 {
+                return Err("Line has zero length");
+            }
+            let t_of = |p: Point| ((p.x - start.x) * dx + (p.y - start.y) * dy) / len2;
+            let me = Prim::Seg(*start, *end);
+            let mut ts: Vec<f64> = cutters
+                .iter()
+                .flat_map(|c| intersect_prims(&me, c))
+                .map(t_of)
+                .filter(|t| *t > TRIM_EPS && *t < 1.0 - TRIM_EPS)
+                .collect();
+            ts.sort_by(f64::total_cmp);
+            let tc = t_of(click).clamp(0.0, 1.0);
+            let lo = ts.iter().copied().filter(|t| *t < tc).last();
+            let hi = ts.iter().copied().find(|t| *t > tc);
+            if lo.is_none() && hi.is_none() {
+                return Err(NO_EDGE);
+            }
+            let at = |t: f64| Point { x: start.x + dx * t, y: start.y + dy * t };
+            let mut out = Vec::new();
+            if let Some(l) = lo {
+                out.push(ElementData::Line { start: *start, end: at(l) });
+            }
+            if let Some(h) = hi {
+                out.push(ElementData::Line { start: at(h), end: *end });
+            }
+            Ok(out)
+        }
+        ElementData::Circle { center, radius } => {
+            let me = Prim::Circle { c: *center, r: *radius };
+            let ang = |p: Point| (p.y - center.y).atan2(p.x - center.x).rem_euclid(TAU);
+            let mut angs: Vec<f64> = cutters
+                .iter()
+                .flat_map(|c| intersect_prims(&me, c))
+                .map(ang)
+                .collect();
+            angs.sort_by(f64::total_cmp);
+            angs.dedup_by(|a, b| (*a - *b).abs() < TRIM_EPS);
+            if angs.len() < 2 {
+                return Err("A circle needs two cutting edges to be trimmed");
+            }
+            let ac = ang(click);
+            // ช่วงที่ครอบจุดคลิก = (prev, next) ส่วนนี้จะถูกตัดทิ้ง
+            let prev = angs.iter().copied().filter(|a| *a <= ac).last().unwrap_or(angs[angs.len() - 1]);
+            let next = angs.iter().copied().find(|a| *a > ac).unwrap_or(angs[0]);
+            let mut e = prev;
+            while e <= next {
+                e += TAU;
+            }
+            Ok(vec![ElementData::Arc {
+                center: *center,
+                radius: *radius,
+                start_angle: next,
+                end_angle: e,
+            }])
+        }
+        ElementData::Arc { center, radius, start_angle, end_angle } => {
+            let span = end_angle - start_angle;
+            let me = Prim::Arc { c: *center, r: *radius, s: *start_angle, e: *end_angle };
+            let u_of = |p: Point| ((p.y - center.y).atan2(p.x - center.x) - start_angle).rem_euclid(TAU);
+            let mut us: Vec<f64> = cutters
+                .iter()
+                .flat_map(|c| intersect_prims(&me, c))
+                .map(u_of)
+                .filter(|u| *u > TRIM_EPS && *u < span - TRIM_EPS)
+                .collect();
+            us.sort_by(f64::total_cmp);
+            let mut uc = u_of(click);
+            if uc > span {
+                uc = if uc - span > TAU - uc { 0.0 } else { span };
+            }
+            let lo = us.iter().copied().filter(|u| *u < uc).last();
+            let hi = us.iter().copied().find(|u| *u > uc);
+            if lo.is_none() && hi.is_none() {
+                return Err(NO_EDGE);
+            }
+            let mut out = Vec::new();
+            if let Some(l) = lo {
+                out.push(ElementData::Arc {
+                    center: *center,
+                    radius: *radius,
+                    start_angle: *start_angle,
+                    end_angle: start_angle + l,
+                });
+            }
+            if let Some(h) = hi {
+                out.push(ElementData::Arc {
+                    center: *center,
+                    radius: *radius,
+                    start_angle: start_angle + h,
+                    end_angle: *end_angle,
+                });
+            }
+            Ok(out)
+        }
+        ElementData::Polyline { .. } => Err("Trimming polylines isn't supported yet"),
+        ElementData::Dimension { .. } => Err("Dimensions can't be trimmed"),
+    }
+}
+
+/// ยืดปลายที่อยู่ใกล้จุดคลิกที่สุดของ `data` ไปจนชนเส้นขอบ (cutters)
+fn extend_data(
+    data: &ElementData,
+    click: Point,
+    cutters: &[Prim],
+    reach: f64,
+) -> Result<ElementData, &'static str> {
+    const NO_EDGE: &str = "No boundary found to extend to";
+    match data {
+        ElementData::Line { start, end } => {
+            let (dx, dy) = (end.x - start.x, end.y - start.y);
+            let len = dx.hypot(dy);
+            if len < 1e-9 {
+                return Err("Line has zero length");
+            }
+            let (ux, uy) = (dx / len, dy / len);
+            let t = ((click.x - start.x) * dx + (click.y - start.y) * dy) / (len * len);
+            let from_end = t >= 0.5;
+            let (origin, dir) = if from_end { (*end, (ux, uy)) } else { (*start, (-ux, -uy)) };
+            let ray = Prim::Seg(origin, Point { x: origin.x + dir.0 * reach, y: origin.y + dir.1 * reach });
+            let best = cutters
+                .iter()
+                .flat_map(|c| intersect_prims(&ray, c))
+                .map(|p| (p.x - origin.x) * dir.0 + (p.y - origin.y) * dir.1)
+                .filter(|d| *d > 1e-7)
+                .fold(f64::MAX, f64::min);
+            if best == f64::MAX {
+                return Err(NO_EDGE);
+            }
+            let np = Point { x: origin.x + dir.0 * best, y: origin.y + dir.1 * best };
+            Ok(if from_end {
+                ElementData::Line { start: *start, end: np }
+            } else {
+                ElementData::Line { start: np, end: *end }
+            })
+        }
+        ElementData::Arc { center, radius, start_angle, end_angle } => {
+            let span = end_angle - start_angle;
+            let gap = TAU - span;
+            if gap < TRIM_EPS {
+                return Err("Arc is already a full circle");
+            }
+            let ang = |p: Point| (p.y - center.y).atan2(p.x - center.x);
+            let uc = (ang(click) - start_angle).rem_euclid(TAU);
+            let from_end = if uc <= span { uc >= span / 2.0 } else { uc - span <= TAU - uc };
+            let me = Prim::Circle { c: *center, r: *radius };
+            let best = cutters
+                .iter()
+                .flat_map(|c| intersect_prims(&me, c))
+                .map(|p| {
+                    let a = ang(p);
+                    if from_end { (a - end_angle).rem_euclid(TAU) } else { (start_angle - a).rem_euclid(TAU) }
+                })
+                .filter(|d| *d > TRIM_EPS && *d < gap - TRIM_EPS)
+                .fold(f64::MAX, f64::min);
+            if best == f64::MAX {
+                return Err(NO_EDGE);
+            }
+            Ok(if from_end {
+                ElementData::Arc { center: *center, radius: *radius, start_angle: *start_angle, end_angle: end_angle + best }
+            } else {
+                ElementData::Arc { center: *center, radius: *radius, start_angle: start_angle - best, end_angle: *end_angle }
+            })
+        }
+        ElementData::Circle { .. } => Err("Circles can't be extended"),
+        ElementData::Polyline { .. } => Err("Extending polylines isn't supported yet"),
+        ElementData::Dimension { .. } => Err("Dimensions can't be extended"),
     }
 }
 
