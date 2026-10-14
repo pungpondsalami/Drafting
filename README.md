@@ -104,7 +104,7 @@ Type commands in the command bar at the bottom:
 | `c`, `circle` | Circle tool |
 | `a`, `arc` | 3-point arc tool |
 | `pl`, `pline`, `polyline` | Polyline tool |
-| `of`, `offset`, `of [space]` | Offset tool |
+| `of`, `offset`, `of [dist]` | Offset tool |
 | `ar`, `array` | Rectangular array |
 | `fit` | Zoom to fit |
 | `z` | Zoom in at cursor |
