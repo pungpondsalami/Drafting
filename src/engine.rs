@@ -567,10 +567,24 @@ impl Engine {
 
     /// คลิกส่วนที่จะตัดทิ้ง (เส้นตัด = วัตถุอื่นทั้งหมด)
     pub fn trim_at(&mut self, wx: f64, wy: f64) -> Result<(), &'static str> {
-        let id = self.pick_at(wx, wy).ok_or("Click on an object to trim")?;
+        let Some(id) = self.pick_at(wx, wy) else {
+            eprintln!("trim: nothing under the cursor at ({:.3}, {:.3})", wx, wy);
+            return Err("Click on an object to trim");
+        };
         let i = self.index_of(id).ok_or("Object no longer exists")?;
         let cutters = self.other_prims(id);
-        let pieces = trim_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters)?;
+        let result = trim_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters);
+        eprintln!(
+            "trim: id {} {:?} | {} cutting prims | {}",
+            id,
+            self.history[i].data,
+            cutters.len(),
+            match &result {
+                Ok((k, _)) => format!("ok, {} piece(s) kept", k.len()),
+                Err(e) => e.to_string(),
+            }
+        );
+        let (pieces, _) = result?;
         self.checkpoint();
         self.history.remove(i);
         for data in pieces {
@@ -590,11 +604,31 @@ impl Engine {
             .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
             .unwrap_or(0.0);
         let cutters = self.other_prims(id);
-        let new = extend_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters, diag * 4.0 + 1000.0)?;
+        let (new, _) = extend_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters, diag * 4.0 + 1000.0)?;
         self.checkpoint();
         self.history[i].data = new;
         self.rebuild_index();
         Ok(())
+    }
+
+    pub fn trim_preview(&self, wx: f64, wy: f64) -> Option<ElementData> {
+        let id = self.pick_at(wx, wy)?;
+        let i = self.index_of(id)?;
+        let cutters = self.other_prims(id);
+        trim_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters).ok().map(|(_, r)| r)
+    }
+
+    pub fn extend_preview(&self, wx: f64, wy: f64) -> Option<ElementData> {
+        let id = self.pick_at(wx, wy)?;
+        let i = self.index_of(id)?;
+        let diag = self
+            .get_elements_bounds()
+            .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
+            .unwrap_or(0.0);
+        let cutters = self.other_prims(id);
+        extend_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters, diag * 4.0 + 1000.0)
+            .ok()
+            .map(|(_, a)| a)
     }
 
     pub fn select_in_box(
@@ -1720,12 +1754,13 @@ impl ElementData {
 
 const TRIM_EPS: f64 = 1e-9;
 
-/// ตัดส่วนของ `data` ที่ click ชี้อยู่ ระหว่างเส้นตัด (cutters) คืนชิ้นที่เหลือ
+/// ตัดส่วนของ `data` ที่ click ชี้อยู่ ระหว่างเส้นตัด (cutters)
+/// คืน (ชิ้นที่เหลือ, ส่วนที่ถูกตัดทิ้ง) — ส่วนที่ตัดทิ้งใช้วาดพรีวิว
 fn trim_data(
     data: &ElementData,
     click: Point,
     cutters: &[Prim],
-) -> Result<Vec<ElementData>, &'static str> {
+) -> Result<(Vec<ElementData>, ElementData), &'static str> {
     const NO_EDGE: &str = "No cutting edge crosses this part";
     match data {
         ElementData::Line { start, end } => {
@@ -1757,7 +1792,8 @@ fn trim_data(
             if let Some(h) = hi {
                 out.push(ElementData::Line { start: at(h), end: *end });
             }
-            Ok(out)
+            let removed = ElementData::Line { start: at(lo.unwrap_or(0.0)), end: at(hi.unwrap_or(1.0)) };
+            Ok((out, removed))
         }
         ElementData::Circle { center, radius } => {
             let me = Prim::Circle { c: *center, r: *radius };
@@ -1780,12 +1816,14 @@ fn trim_data(
             while e <= next {
                 e += TAU;
             }
-            Ok(vec![ElementData::Arc {
-                center: *center,
-                radius: *radius,
-                start_angle: next,
-                end_angle: e,
-            }])
+            let mut re = next;
+            while re <= prev {
+                re += TAU;
+            }
+            Ok((
+                vec![ElementData::Arc { center: *center, radius: *radius, start_angle: next, end_angle: e }],
+                ElementData::Arc { center: *center, radius: *radius, start_angle: prev, end_angle: re },
+            ))
         }
         ElementData::Arc { center, radius, start_angle, end_angle } => {
             let span = end_angle - start_angle;
@@ -1824,20 +1862,27 @@ fn trim_data(
                     end_angle: *end_angle,
                 });
             }
-            Ok(out)
+            let removed = ElementData::Arc {
+                center: *center,
+                radius: *radius,
+                start_angle: start_angle + lo.unwrap_or(0.0),
+                end_angle: start_angle + hi.unwrap_or(span),
+            };
+            Ok((out, removed))
         }
-        ElementData::Polyline { .. } => Err("Trimming polylines isn't supported yet"),
+        ElementData::Polyline { points, closed } => trim_polyline(points, *closed, click, cutters),
         ElementData::Dimension { .. } => Err("Dimensions can't be trimmed"),
     }
 }
 
 /// ยืดปลายที่อยู่ใกล้จุดคลิกที่สุดของ `data` ไปจนชนเส้นขอบ (cutters)
+/// คืน (วัตถุใหม่, ส่วนที่ยืดเพิ่ม) — ส่วนที่ยืดเพิ่มใช้วาดพรีวิว
 fn extend_data(
     data: &ElementData,
     click: Point,
     cutters: &[Prim],
     reach: f64,
-) -> Result<ElementData, &'static str> {
+) -> Result<(ElementData, ElementData), &'static str> {
     const NO_EDGE: &str = "No boundary found to extend to";
     match data {
         ElementData::Line { start, end } => {
@@ -1861,11 +1906,15 @@ fn extend_data(
                 return Err(NO_EDGE);
             }
             let np = Point { x: origin.x + dir.0 * best, y: origin.y + dir.1 * best };
-            Ok(if from_end {
-                ElementData::Line { start: *start, end: np }
-            } else {
-                ElementData::Line { start: np, end: *end }
-            })
+            let added = ElementData::Line { start: origin, end: np };
+            Ok((
+                if from_end {
+                    ElementData::Line { start: *start, end: np }
+                } else {
+                    ElementData::Line { start: np, end: *end }
+                },
+                added,
+            ))
         }
         ElementData::Arc { center, radius, start_angle, end_angle } => {
             let span = end_angle - start_angle;
@@ -1889,16 +1938,266 @@ fn extend_data(
             if best == f64::MAX {
                 return Err(NO_EDGE);
             }
+            let (c, r) = (*center, *radius);
             Ok(if from_end {
-                ElementData::Arc { center: *center, radius: *radius, start_angle: *start_angle, end_angle: end_angle + best }
+                (
+                    ElementData::Arc { center: c, radius: r, start_angle: *start_angle, end_angle: end_angle + best },
+                    ElementData::Arc { center: c, radius: r, start_angle: *end_angle, end_angle: end_angle + best },
+                )
             } else {
-                ElementData::Arc { center: *center, radius: *radius, start_angle: start_angle - best, end_angle: *end_angle }
+                (
+                    ElementData::Arc { center: c, radius: r, start_angle: start_angle - best, end_angle: *end_angle },
+                    ElementData::Arc { center: c, radius: r, start_angle: start_angle - best, end_angle: *start_angle },
+                )
             })
         }
         ElementData::Circle { .. } => Err("Circles can't be extended"),
-        ElementData::Polyline { .. } => Err("Extending polylines isn't supported yet"),
+        ElementData::Polyline { points, closed } => extend_polyline(points, *closed, click, cutters, reach),
         ElementData::Dimension { .. } => Err("Dimensions can't be extended"),
     }
+}
+
+
+// ---------------- Polyline ----------------
+
+fn poly_segs(n: usize, closed: bool) -> usize {
+    if closed { n } else { n.saturating_sub(1) }
+}
+
+/// จุดบน polyline ที่พารามิเตอร์ s (จำนวนเต็ม = ลำดับ vertex, ทศนิยม = สัดส่วนบน segment)
+fn poly_point_at(pts: &[Point], closed: bool, s: f64) -> Point {
+    let n = pts.len();
+    let segs = poly_segs(n, closed);
+    let mut s = s;
+    if closed && s >= segs as f64 {
+        s -= segs as f64;
+    }
+    let i = (s.floor().max(0.0) as usize).min(segs - 1);
+    let t = s - i as f64;
+    let (a, b) = (pts[i], pts[(i + 1) % n]);
+    Point { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+}
+
+/// ท่อนของ polyline จากพารามิเตอร์ sa ถึง sb (sb > sa, closed อนุญาตให้ sb เกินรอบได้)
+fn poly_sub(pts: &[Point], closed: bool, sa: f64, sb: f64) -> Vec<Point> {
+    let n = pts.len();
+    let mut out = vec![poly_point_at(pts, closed, sa)];
+    let mut m = sa.floor() as i64 + 1;
+    while (m as f64) < sb - 1e-9 {
+        if (m as f64) > sa + 1e-9 {
+            out.push(pts[(m as usize) % n]);
+        }
+        m += 1;
+    }
+    out.push(poly_point_at(pts, closed, sb));
+    out.dedup_by(|a, b| (a.x - b.x).hypot(a.y - b.y) < 1e-9);
+    out
+}
+
+/// พารามิเตอร์ของจุดบน polyline ที่ใกล้จุดคลิกที่สุด
+fn poly_click_param(pts: &[Point], closed: bool, click: Point) -> f64 {
+    let n = pts.len();
+    let mut best = (f64::MAX, 0.0);
+    for i in 0..poly_segs(n, closed) {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 < 1e-18 {
+            0.0
+        } else {
+            (((click.x - a.x) * dx + (click.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+        };
+        let d = (click.x - (a.x + dx * t)).hypot(click.y - (a.y + dy * t));
+        if d < best.0 {
+            best = (d, i as f64 + t);
+        }
+    }
+    best.1
+}
+
+/// พารามิเตอร์ของทุกจุดที่ cutters ตัด polyline (เรียงและตัดซ้ำแล้ว)
+fn poly_cuts(pts: &[Point], closed: bool, cutters: &[Prim]) -> Vec<f64> {
+    let n = pts.len();
+    let mut cuts = Vec::new();
+    for i in 0..poly_segs(n, closed) {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        if len2 < 1e-18 {
+            continue;
+        }
+        let me = Prim::Seg(a, b);
+        for c in cutters {
+            for p in intersect_prims(&me, c) {
+                let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
+                cuts.push(i as f64 + t);
+            }
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    cuts
+}
+
+fn trim_polyline(
+    pts: &[Point],
+    closed: bool,
+    click: Point,
+    cutters: &[Prim],
+) -> Result<(Vec<ElementData>, ElementData), &'static str> {
+    let n = pts.len();
+    if n < 2 || (closed && n < 3) {
+        return Err("Polyline is too short to trim");
+    }
+    let segs = poly_segs(n, closed) as f64;
+    let mut cuts = poly_cuts(pts, closed, cutters);
+    let sc = poly_click_param(pts, closed, click);
+    let mk = |v: Vec<Point>| ElementData::Polyline { points: v, closed: false };
+
+    if !closed {
+        cuts.retain(|s| *s > TRIM_EPS && *s < segs - TRIM_EPS);
+        let lo = cuts.iter().copied().filter(|s| *s < sc).last();
+        let hi = cuts.iter().copied().find(|s| *s > sc);
+        if lo.is_none() && hi.is_none() {
+            return Err("No cutting edge crosses this part");
+        }
+        let mut out = Vec::new();
+        if let Some(l) = lo {
+            let v = poly_sub(pts, false, 0.0, l);
+            if v.len() >= 2 {
+                out.push(mk(v));
+            }
+        }
+        if let Some(h) = hi {
+            let v = poly_sub(pts, false, h, segs);
+            if v.len() >= 2 {
+                out.push(mk(v));
+            }
+        }
+        let removed = mk(poly_sub(pts, false, lo.unwrap_or(0.0), hi.unwrap_or(segs)));
+        Ok((out, removed))
+    } else {
+        // จุดตัดที่ s≈0 กับ s≈segs คือจุดเดียวกัน
+        if cuts.len() >= 2 && cuts[0] < TRIM_EPS && segs - cuts[cuts.len() - 1] < TRIM_EPS {
+            cuts.pop();
+        }
+        if cuts.len() < 2 {
+            return Err("A closed polyline needs two cutting edges to be trimmed");
+        }
+        let prev = cuts.iter().copied().filter(|s| *s <= sc).last().unwrap_or(cuts[cuts.len() - 1]);
+        let next = cuts.iter().copied().find(|s| *s > sc).unwrap_or(cuts[0]);
+        let mut e = prev;
+        while e <= next {
+            e += segs;
+        }
+        let mut re = next;
+        while re <= prev {
+            re += segs;
+        }
+        let kept = poly_sub(pts, true, next, e);
+        let removed = poly_sub(pts, true, prev, re);
+        Ok((vec![mk(kept)], mk(removed)))
+    }
+}
+
+fn extend_polyline(
+    pts: &[Point],
+    closed: bool,
+    click: Point,
+    cutters: &[Prim],
+    reach: f64,
+) -> Result<(ElementData, ElementData), &'static str> {
+    if closed {
+        return Err("Closed polylines can't be extended");
+    }
+    let n = pts.len();
+    if n < 2 {
+        return Err("Polyline is too short to extend");
+    }
+    let (d0, d1) = (
+        (click.x - pts[0].x).hypot(click.y - pts[0].y),
+        (click.x - pts[n - 1].x).hypot(click.y - pts[n - 1].y),
+    );
+    let from_end = d1 <= d0;
+    let (origin, prev) = if from_end { (pts[n - 1], pts[n - 2]) } else { (pts[0], pts[1]) };
+    let (dx, dy) = (origin.x - prev.x, origin.y - prev.y);
+    let len = dx.hypot(dy);
+    if len < 1e-12 {
+        return Err("End segment has zero length");
+    }
+    let dir = (dx / len, dy / len);
+    let ray = Prim::Seg(origin, Point { x: origin.x + dir.0 * reach, y: origin.y + dir.1 * reach });
+    let best = cutters
+        .iter()
+        .flat_map(|c| intersect_prims(&ray, c))
+        .map(|p| (p.x - origin.x) * dir.0 + (p.y - origin.y) * dir.1)
+        .filter(|d| *d > 1e-7)
+        .fold(f64::MAX, f64::min);
+    if best == f64::MAX {
+        return Err("No boundary found to extend to");
+    }
+    let np = Point { x: origin.x + dir.0 * best, y: origin.y + dir.1 * best };
+    let mut new_pts = pts.to_vec();
+    if from_end {
+        new_pts[n - 1] = np;
+    } else {
+        new_pts[0] = np;
+    }
+    Ok((
+        ElementData::Polyline { points: new_pts, closed: false },
+        ElementData::Line { start: origin, end: np },
+    ))
+}
+
+// ---------------- Diagnostics ----------------
+
+fn prim_distance(p: Point, prim: &Prim) -> f64 {
+    match prim {
+        Prim::Seg(a, b) => dist_point_seg(p, *a, *b),
+        Prim::Circle { c, r } => ((p.x - c.x).hypot(p.y - c.y) - r).abs(),
+        Prim::Arc { c, r, s, e } => {
+            let a = (p.y - c.y).atan2(p.x - c.x);
+            if angle_in_range(a, *s, *e) {
+                ((p.x - c.x).hypot(p.y - c.y) - r).abs()
+            } else {
+                let (ps, pe) = (arc_point(*c, *r, *s), arc_point(*c, *r, *e));
+                (p.x - ps.x).hypot(p.y - ps.y).min((p.x - pe.x).hypot(p.y - pe.y))
+            }
+        }
+    }
+}
+
+fn sample_target(data: &ElementData) -> Vec<Point> {
+    match data {
+        ElementData::Line { start, end } => (0..=20)
+            .map(|i| {
+                let t = i as f64 / 20.0;
+                Point { x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t }
+            })
+            .collect(),
+        ElementData::Circle { center, radius } => (0..128)
+            .map(|i| arc_point(*center, *radius, TAU * i as f64 / 128.0))
+            .collect(),
+        ElementData::Arc { center, radius, start_angle, end_angle } => (0..=64)
+            .map(|i| arc_point(*center, *radius, start_angle + (end_angle - start_angle) * i as f64 / 64.0))
+            .collect(),
+        ElementData::Polyline { points, .. } => points.clone(),
+        ElementData::Dimension { .. } => vec![],
+    }
+}
+
+/// จุดบนวัตถุที่อยู่ใกล้เส้นตัดอื่นที่สุด คืน (ระยะ, จุดนั้น) — ใช้ดีบักตอน "No cutting edge"
+fn closest_approach(data: &ElementData, cutters: &[Prim]) -> Option<(f64, Point)> {
+    let mut best: Option<(f64, Point)> = None;
+    for s in sample_target(data) {
+        for c in cutters {
+            let d = prim_distance(s, c);
+            if best.map_or(true, |(b, _)| d < b) {
+                best = Some((d, s));
+            }
+        }
+    }
+    best
 }
 
 #[cfg(test)]

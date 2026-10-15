@@ -159,6 +159,7 @@ mod imp {
         pub offset_stable: Cell<Option<(f64, f64)>>, // จุดที่ใช้ตัดสินฝั่งของ ghost ตอนนี้
         pub offset_k: Cell<f64>,                     // ตัวคูณระยะ 0..1 (1 = เต็ม)
         pub offset_phase: Cell<u8>,                  // 0 นิ่ง, 1 กำลังหด, 2 กำลังงอก
+        pub shift_down: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -216,6 +217,11 @@ mod imp {
                     let is_ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                     let is_shift = state.contains(gdk::ModifierType::SHIFT_MASK);
                     let typing = obj.is_typing();
+
+                    if key == gdk::Key::Shift_L || key == gdk::Key::Shift_R {
+                        obj.set_shift(true);
+                        return glib::Propagation::Proceed;
+                    }
 
                     // Redo: Ctrl+Y หรือ Ctrl+Shift+Z
                     if is_ctrl
@@ -326,6 +332,17 @@ mod imp {
                     glib::Propagation::Proceed
                 }
             ));
+
+            key_ctrl.connect_key_released(glib::clone!(
+                #[weak]
+                obj,
+                move |_, key, _, _| {
+                    if key == gdk::Key::Shift_L || key == gdk::Key::Shift_R {
+                        obj.set_shift(false);
+                    }
+                }
+            ));
+
             obj.add_controller(key_ctrl);
 
             // ปิด Revealer เมื่อกดปุ่ม Apply
@@ -837,6 +854,15 @@ impl DraftingWindow {
         self.sync_tool_buttons();
     }
 
+    fn set_shift(&self, down: bool) {
+        let imp = self.imp();
+        if imp.shift_down.replace(down) != down {
+            if let Some(page) = imp.tab_view.selected_page() {
+                page.child().queue_draw();
+            }
+        }
+    }
+
     pub fn set_offset_distance(&self, v: f64) {
         let imp = self.imp();
         if v > 0.0 {
@@ -1208,7 +1234,7 @@ impl DraftingWindow {
             page,
             #[weak]
             canvas,
-            move |_, _, x, y| {
+            move |gesture, _, x, y| {
                 canvas.grab_focus();
                 let imp = obj.imp();
                 imp.is_mouse_pressed.set(true);
@@ -1427,11 +1453,10 @@ impl DraftingWindow {
                         }
 
                         DrawingMode::Trim | DrawingMode::Extend => {
-                            let r = if imp.current_mode.get() == DrawingMode::Trim {
-                                d.trim_at(wx, wy)
-                            } else {
-                                d.extend_at(wx, wy)
-                            };
+                            let swap = gesture.current_event_state().contains(gdk::ModifierType::SHIFT_MASK)
+                                || imp.shift_down.get();
+                            let trimming = (imp.current_mode.get() == DrawingMode::Trim) != swap;
+                            let r = if trimming { d.trim_at(wx, wy) } else { d.extend_at(wx, wy) };
                             match r {
                                 Ok(()) => imp.offset_msg.borrow_mut().clear(),
                                 Err(m) => *imp.offset_msg.borrow_mut() = m.into(),
@@ -1869,6 +1894,26 @@ impl DraftingWindow {
             }
         }
 
+        // --- Trim / Extend preview ---
+        {
+            let mode = imp.current_mode.get();
+            if matches!(mode, DrawingMode::Trim | DrawingMode::Extend) {
+                let trimming = (mode == DrawingMode::Trim) != imp.shift_down.get();
+                let prev = if trimming { d.trim_preview(wx, wy) } else { d.extend_preview(wx, wy) };
+                if let Some(data) = prev {
+                    cr.new_path();
+                    if trimming {
+                        cr.set_source_rgba(1.0, 0.25, 0.25, 0.9); // แดง = ส่วนที่จะหาย
+                    } else {
+                        cr.set_source_rgba(0.3, 1.0, 0.5, 0.9); // เขียว = ส่วนที่จะเพิ่ม
+                    }
+                    cr.set_line_width(3.0);
+                    trace_element(cr, cam, &data);
+                    let _ = cr.stroke();
+                }
+            }
+        }
+
         // --- Selection Box ---
         if imp.is_dragging.get() && imp.current_mode.get() == DrawingMode::Select {
             if let Some((sx, sy)) = imp.drag_start.get() {
@@ -1972,10 +2017,11 @@ impl DraftingWindow {
             if msg.is_empty() { format!("  {}", step) } else { format!("  {} | {}", step, msg) }
         } else if matches!(imp.current_mode.get(), DrawingMode::Trim | DrawingMode::Extend) {
             let msg = imp.offset_msg.borrow();
-            let step = if imp.current_mode.get() == DrawingMode::Trim {
-                "click the part to remove"
+            let trimming = (imp.current_mode.get() == DrawingMode::Trim) != imp.shift_down.get();
+            let step = if trimming {
+                "click the part to remove | Shift: extend"
             } else {
-                "click near the end to extend"
+                "click near the end to extend | Shift: trim"
             };
             if msg.is_empty() { format!("  {}", step) } else { format!("  {} | {}", step, msg) }
         } else {
@@ -2324,6 +2370,167 @@ impl DraftingWindow {
     }
 }
 
+fn trace_element(cr: &gtk::cairo::Context, cam: &crate::engine::Camera, data: &ElementData) {
+    match data {
+        ElementData::Line { start, end } => {
+            let (a, b) = (cam.world_to_screen(start.x, start.y), cam.world_to_screen(end.x, end.y));
+            cr.move_to(a.0, a.1);
+            cr.line_to(b.0, b.1);
+        }
+        ElementData::Circle { center, radius } => {
+            let c = cam.world_to_screen(center.x, center.y);
+            cr.arc(c.0, c.1, radius * cam.scale, 0.0, std::f64::consts::TAU);
+        }
+        ElementData::Arc { center, radius, start_angle, end_angle } => {
+            let c = cam.world_to_screen(center.x, center.y);
+            cr.arc_negative(c.0, c.1, radius * cam.scale, -start_angle, -end_angle);
+        }
+
+        ElementData::Polyline { points, closed } => {
+            let mut it = points.iter();
+            if let Some(p0) = it.next() {
+                let (x, y) = cam.world_to_screen(p0.x, p0.y);
+                cr.move_to(x, y);
+                for p in it {
+                    let (x, y) = cam.world_to_screen(p.x, p.y);
+                    cr.line_to(x, y);
+                }
+                if *closed {
+                    cr.close_path();
+                }
+            }
+        }
+
+        _ => {}
+    }
+}
+
+// ===== วางใน src/window.rs ระดับบนสุด (ใกล้ bulge_segment) =====
+
+/// ประมาณ B-spline/NURBS เป็นจุดบนเส้นโค้ง (de Boor) ถ้า knots ไม่ครบ คืน None
+fn spline_points(
+    degree: usize,
+    knots: &[f64],
+    ctrl: &[(f64, f64)],
+    weights: &[f64],
+) -> Option<Vec<Point>> {
+    let n = ctrl.len();
+    if degree == 0 || n <= degree || knots.len() != n + degree + 1 {
+        return None;
+    }
+    // พิกัด homogeneous (x*w, y*w, w) ใช้ได้ทั้ง B-spline ธรรมดาและ NURBS
+    let rational = weights.len() == n;
+    let hp: Vec<[f64; 3]> = ctrl
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y))| {
+            let w = if rational { weights[i] } else { 1.0 };
+            [x * w, y * w, w]
+        })
+        .collect();
+
+    let (u0, u1) = (knots[degree], knots[n]);
+    if !(u1 > u0) {
+        return None;
+    }
+
+    let eval = |u: f64, k: usize| -> Point {
+        let mut d: Vec<[f64; 3]> = (0..=degree).map(|j| hp[j + k - degree]).collect();
+        for r in 1..=degree {
+            for j in (r..=degree).rev() {
+                let i = j + k - degree;
+                let denom = knots[i + degree + 1 - r] - knots[i];
+                let a = if denom.abs() < 1e-14 { 0.0 } else { (u - knots[i]) / denom };
+                for c in 0..3 {
+                    d[j][c] = d[j - 1][c] * (1.0 - a) + d[j][c] * a;
+                }
+            }
+        }
+        let p = d[degree];
+        let w = if p[2].abs() < 1e-14 { 1.0 } else { p[2] };
+        Point { x: p[0] / w, y: p[1] / w }
+    };
+
+    const PER_SPAN: usize = 8;
+    let mut out = Vec::new();
+    for k in degree..n {
+        let (a, b) = (knots[k], knots[k + 1]);
+        if !(b > a) {
+            continue; // ช่วงว่าง (knot ซ้ำ)
+        }
+        let last = k == n - 1;
+        for s in 0..PER_SPAN {
+            out.push(eval(a + (b - a) * s as f64 / PER_SPAN as f64, k));
+        }
+        if last {
+            out.push(eval(b, k)); // ปลายสุด
+        }
+    }
+    if out.len() >= 2 { Some(out) } else { None }
+}
+
+/// เส้นผ่านจุด fit (ใช้เมื่อ spline ไม่มี control points)
+fn polyline_through(pts: &[(f64, f64)]) -> Vec<Point> {
+    pts.iter().map(|(x, y)| Point { x: *x, y: *y }).collect()
+}
+
+fn ellipse_points(
+    center: (f64, f64),
+    major: (f64, f64),
+    ratio: f64,
+    start: f64,
+    end: f64,
+) -> (Vec<Point>, bool) {
+    let minor = (-major.1 * ratio, major.0 * ratio);
+    let mut e = end;
+    while e <= start {
+        e += std::f64::consts::TAU;
+    }
+    let span = e - start;
+    let full = (span - std::f64::consts::TAU).abs() < 1e-6;
+    let steps = ((span / std::f64::consts::TAU * 96.0).ceil() as usize).max(16);
+    let count = if full { steps } else { steps + 1 };
+    let pts = (0..count)
+        .map(|i| {
+            let t = start + span * i as f64 / steps as f64;
+            Point {
+                x: center.0 + major.0 * t.cos() + minor.0 * t.sin(),
+                y: center.1 + major.1 * t.cos() + minor.1 * t.sin(),
+            }
+        })
+        .collect();
+    (pts, full)
+}
+
+// arm ใหม่ใน match ของ dxf_to_elements (ก่อน `_ => ...`)
+//
+// EntityType::Spline(s) => {
+//     let ctrl: Vec<(f64, f64)> = s.control_points.iter().map(|v| (v.x, v.y)).collect();
+//     let pts = spline_points(s.degree.max(0) as usize, &s.knots, &ctrl, &s.weights)
+//         .or_else(|| {
+//             let src: Vec<(f64, f64)> = if s.fit_points.len() >= 2 {
+//                 s.fit_points.iter().map(|v| (v.x, v.y)).collect()
+//             } else {
+//                 ctrl.clone()
+//             };
+//             (src.len() >= 2).then(|| polyline_through(&src))
+//         });
+//     match pts {
+//         Some(points) => out.push(ElementData::Polyline { points, closed: false }),
+//         None => skipped += 1,
+//     }
+// }
+// EntityType::Ellipse(el) => {
+//     let (points, full) = ellipse_points(
+//         (el.center.x, el.center.y),
+//         (el.major_axis.x, el.major_axis.y),
+//         el.minor_axis_ratio,
+//         el.start_parameter,
+//         el.end_parameter,
+//     );
+//     out.push(ElementData::Polyline { points, closed: full });
+// }
+
 /// bulge = tan(มุมโค้ง/4), บวก = ทวนเข็ม (CCW) จาก p1 ไป p2
 fn bulge_segment(p1: Point, p2: Point, bulge: f64) -> ElementData {
     let (dx, dy) = (p2.x - p1.x, p2.y - p1.y);
@@ -2399,6 +2606,33 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> (Vec<ElementData>, usize) {
                 } else {
                     out.push(ElementData::Polyline { points: pts, closed: p.is_closed });
                 }
+            }
+
+            EntityType::Spline(s) => {
+                let ctrl: Vec<(f64, f64)> = s.control_points.iter().map(|v| (v.x, v.y)).collect();
+                let pts = spline_points(s.degree.max(0) as usize, &s.knots, &ctrl, &s.weights)
+                    .or_else(|| {
+                        let src: Vec<(f64, f64)> = if s.fit_points.len() >= 2 {
+                            s.fit_points.iter().map(|v| (v.x, v.y)).collect()
+                        } else {
+                            ctrl.clone()
+                        };
+                        (src.len() >= 2).then(|| polyline_through(&src))
+                    });
+                match pts {
+                    Some(points) => out.push(ElementData::Polyline { points, closed: false }),
+                    None => skipped += 1,
+                }
+            }
+            EntityType::Ellipse(el) => {
+                let (points, full) = ellipse_points(
+                    (el.center.x, el.center.y),
+                    (el.major_axis.x, el.major_axis.y),
+                    el.minor_axis_ratio,
+                    el.start_parameter,
+                    el.end_parameter,
+                );
+                out.push(ElementData::Polyline { points, closed: full });
             }
             _ => skipped += 1,
         }
