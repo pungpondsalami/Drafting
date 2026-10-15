@@ -86,6 +86,7 @@
                     <child>
                       <object class="GtkButton" id="btn_new">
                         <property name="icon-name">plus-large-square-outline-symbolic</property>
+                        <property name="tooltip-text">New</property>
                       </object>
                     </child>
                     <child>
@@ -97,6 +98,7 @@
                     <child>
                       <object class="GtkButton" id="btn_save">
                         <property name="icon-name">arrow-pointing-at-line-down-symbolic</property>
+                        <property name="tooltip-text">Save (Ctrl+S)</property>
                       </object>
                     </child>
                   </object>
@@ -107,11 +109,13 @@
                     <child>
                       <object class="GtkButton" id="btn_undo">
                         <property name="icon-name">arrow-hook-left-horizontal2-symbolic</property>
+                        <property name="tooltip-text">Undo (Ctrl+Z)</property>
                       </object>
                     </child>
                     <child>
                       <object class="GtkButton" id="btn_redo">
                         <property name="icon-name">arrow-turn-right-horizontal2-symbolic</property>
+                        <property name="tooltip-text">Redo</property>
                       </object>
                     </child>
                   </object>
