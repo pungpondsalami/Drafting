@@ -336,6 +336,28 @@
                         </child>
                       </object>
                     </child>
+                    <child>
+                      <object class="GtkBox">
+                        <property name="spacing">6</property>
+                        <child>
+                          <object class="GtkButton" id="btn_layer_add">
+                            <property name="icon-name">list-add-symbolic</property>
+                            <property name="tooltip-text">New layer</property>
+                            <style>
+                              <class name="suggested-action"/>
+                              <class name="drafting-apply-array"/>
+                            </style>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_layer_move">
+                            <property name="label">Move selection here</property>
+                            <property name="hexpand">true</property>
+                            <property name="tooltip-text">Move the selected objects to the current layer</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
                   </object>
                 </child>
               </object>

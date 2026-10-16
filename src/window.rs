@@ -140,6 +140,10 @@ mod imp {
         #[template_child]
         pub layer_list: TemplateChild<gtk::ListBox>,
         pub building_layers: Cell<bool>,
+        #[template_child]
+        pub btn_layer_add: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_layer_move: TemplateChild<gtk::Button>,
 
         pub current_mode: Cell<crate::engine::ToolMode>,
         pub mouse_pos: Cell<(f64, f64)>,
@@ -862,6 +866,29 @@ mod imp {
                     if let Some(row) = row {
                         let i = row.index() as usize;
                         obj.with_engine(|d| d.set_current_layer(i));
+                    }
+                }
+            ));
+
+            self.btn_layer_add.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    obj.with_engine(|d| {
+                        let i = d.add_layer();
+                        d.set_current_layer(i);
+                    });
+                    obj.refresh_layers();
+                }
+            ));
+
+            self.btn_layer_move.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    obj.with_engine(|d| d.move_selected_to_layer());
+                    if let Some(page) = obj.imp().tab_view.selected_page() {
+                        page.child().grab_focus();
                     }
                 }
             ));
@@ -2146,43 +2173,104 @@ impl DraftingWindow {
         for (i, l) in layers.iter().enumerate() {
             let row = gtk::ListBoxRow::new();
             let hb = gtk::Box::builder()
-                .spacing(6)
-                .margin_start(4)
-                .margin_end(4)
-                .margin_top(2)
-                .margin_bottom(2)
+                .spacing(10)
+                .margin_start(8)
+                .margin_end(8)
+                .margin_top(4)
+                .margin_bottom(4)
                 .build();
+            hb.set_opacity(if l.visible { 1.0 } else { 0.45 });
 
-            let dot = gtk::DrawingArea::builder()
-                .content_width(14)
-                .content_height(14)
-                .valign(gtk::Align::Center)
-                .build();
-            let rgb = l.color;
-            dot.set_draw_func(move |_, cr, w, h| {
-                cr.set_source_rgb(rgb.0 as f64 / 255.0, rgb.1 as f64 / 255.0, rgb.2 as f64 / 255.0);
-                cr.arc(w as f64 / 2.0, h as f64 / 2.0, (w.min(h) as f64) / 2.0, 0.0, std::f64::consts::TAU);
-                let _ = cr.fill();
-            });
+            let color_btn = gtk::ColorDialogButton::new(Some(
+                gtk::ColorDialog::builder().with_alpha(false).title("Layer color").build(),
+            ));
+            color_btn.set_rgba(&gdk::RGBA::new(
+                l.color.0 as f32 / 255.0,
+                l.color.1 as f32 / 255.0,
+                l.color.2 as f32 / 255.0,
+                1.0,
+            ));
+            color_btn.set_valign(gtk::Align::Center);
+            color_btn.set_tooltip_text(Some("Layer color"));
+            color_btn.connect_rgba_notify(glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |b| {
+                    if obj.imp().building_layers.get() {
+                        return;
+                    }
+                    let c = b.rgba();
+                    let rgb = (
+                        (c.red() * 255.0).round() as u8,
+                        (c.green() * 255.0).round() as u8,
+                        (c.blue() * 255.0).round() as u8,
+                    );
+                    obj.with_engine(|d| d.set_layer_color(i, rgb));
+                }
+            ));
 
             let name = gtk::Label::builder()
                 .label(&l.name)
                 .xalign(0.0)
                 .hexpand(true)
-                .halign(gtk::Align::Fill)
                 .width_chars(14)
                 .max_width_chars(24)
                 .ellipsize(gtk::pango::EllipsizeMode::End)
+                .tooltip_text(&l.name)
                 .build();
 
+            if i != 0 {
+                let entry = gtk::Entry::builder().text(&l.name).width_chars(18).build();
+                let pop = gtk::Popover::new();
+                pop.set_child(Some(&entry));
+                pop.set_parent(&hb);
+
+                entry.connect_activate(glib::clone!(
+                    #[weak(rename_to = obj)]
+                    self,
+                    #[weak]
+                    pop,
+                    move |e| {
+                        let text = e.text().to_string();
+                        pop.popdown();
+
+                        let _ = obj.with_engine(|d| d.rename_layer(i, &text));
+                        glib::idle_add_local_once(glib::clone!(
+                            #[weak]
+                            obj,
+                            move || obj.refresh_layers()
+                        ));
+                    }
+                ));
+
+                let right_click = gtk::GestureClick::builder().button(3).build();
+                right_click.connect_pressed(glib::clone!(
+                    #[weak]
+                    pop,
+                    #[weak]
+                    entry,
+                    move |_, _, _, _| {
+                        pop.popup();
+                        entry.grab_focus();
+                        entry.select_region(0, -1);
+                    }
+                ));
+                hb.add_controller(right_click);
+
+                hb.connect_destroy(glib::clone!(
+                    #[weak]
+                    pop,
+                    move |_| pop.unparent()
+                ));
+            }
+
+            let hb_row = hb.clone();
             let eye = gtk::ToggleButton::builder()
                 .icon_name(eye_icon(l.visible))
                 .active(l.visible)
                 .tooltip_text("Show / hide")
                 .css_classes(["flat"])
                 .build();
-
-            let hb_row = hb.clone();
             eye.connect_toggled(glib::clone!(
                 #[weak(rename_to = obj)]
                 self,
@@ -2199,18 +2287,20 @@ impl DraftingWindow {
                 .tooltip_text("Lock / unlock")
                 .css_classes(["flat"])
                 .build();
+            if l.locked {
+                lock.add_css_class("layer-locked");
+            }
             lock.connect_toggled(glib::clone!(
                 #[weak(rename_to = obj)]
                 self,
                 move |b| {
                     b.set_icon_name(lock_icon(b.is_active()));
-                    obj.with_engine(|d| d.set_layer_locked(i, b.is_active()));
-                    if b.is_active() { b.add_css_class("layer-locked") } else { b.remove_css_class("layer-locked") }
                     if b.is_active() {
                         b.add_css_class("layer-locked");
                     } else {
                         b.remove_css_class("layer-locked");
                     }
+                    obj.with_engine(|d| d.set_layer_locked(i, b.is_active()));
                 }
             ));
 
@@ -2221,10 +2311,9 @@ impl DraftingWindow {
             btns.append(&eye);
             btns.append(&lock);
 
-            hb.append(&dot);
+            hb.append(&color_btn);
             hb.append(&name);
             hb.append(&btns);
-
             row.set_child(Some(&hb));
             imp.layer_list.append(&row);
             if i == current {

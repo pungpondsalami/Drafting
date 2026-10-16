@@ -1010,6 +1010,76 @@ impl Engine {
         }
     }
 
+    fn find_layer(&self, name: &str) -> Option<usize> {
+        self.layers.iter().position(|l| l.name.eq_ignore_ascii_case(name))
+    }
+
+    pub fn add_layer(&mut self) -> usize {
+        let mut n = self.layers.len();
+        let name = loop {
+            let c = format!("Layer{}", n);
+            if self.find_layer(&c).is_none() {
+                break c;
+            }
+            n += 1;
+        };
+        self.layers.push(Layer::new(&name, (255, 255, 255)));
+        self.dirty = true;
+        self.layers.len() - 1
+    }
+
+    pub fn rename_layer(&mut self, i: usize, new: &str) -> Result<(), &'static str> {
+        if i == 0 {
+            return Err("Layer 0 can't be renamed");
+        }
+        if i >= self.layers.len() {
+            return Err("Layer no longer exists");
+        }
+        let new = new.trim();
+        if new.is_empty() {
+            return Err("Name can't be empty");
+        }
+        if new.chars().any(|c| "<>/\\\":;?*|=`".contains(c)) {
+            return Err("Name contains characters DXF doesn't allow");
+        }
+        match self.find_layer(new) {
+            Some(j) if j == i => return Ok(()),
+            Some(_) => return Err("A layer with this name already exists"),
+            None => {}
+        }
+        self.layers[i].name = new.to_string();
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn set_layer_color(&mut self, i: usize, c: Rgb) {
+        if let Some(l) = self.layers.get_mut(i) {
+            l.color = c;
+            self.dirty = true;
+        }
+    }
+
+    pub fn move_selected_to_layer(&mut self) -> usize {
+        let target = self.current_layer;
+        let n = self
+            .history
+            .iter()
+            .filter(|e| e.is_selected && e.layer != target)
+            .count();
+        if n == 0 {
+            return 0;
+        }
+        self.checkpoint();
+        for e in self.history.iter_mut().filter(|e| e.is_selected) {
+            e.layer = target;
+        }
+        let l = &self.layers[target];
+        if !l.visible || l.locked {
+            self.drop_selection_on_layer(target);
+        }
+        n
+    }
+
     pub fn get_visible_elements(&self, viewport_bounds: BoundingBox) -> Vec<&DrawingElement> {
         let mut hits = Vec::new();
         self.spatial_index.query(&viewport_bounds, &mut hits);
