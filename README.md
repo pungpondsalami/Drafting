@@ -14,6 +14,7 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Offset (line, circle, arc, polyline) with preview
 - Trim and Extend (line, arc, circle, polyline) with live preview; hold `Shift` to swap between the two
 - Delete the selected objects (`Delete` key or `del` command)
+- Layers: show/hide, lock and pick the current layer from the Layers panel (right dock, or the `la` command); new objects go on the current layer and are drawn in the layer's color
 - Multi-tab support, with an unsaved-changes prompt before closing
 - Open, Save and Save As for DXF files (the file path is remembered per tab); large files open in the background
 - Rectangular array with preview
@@ -36,7 +37,10 @@ DXF files are read with [acadrust](https://crates.io/crates/acadrust) (newer DXF
 | Spline | Yes (flattened to a polyline) | Saved as a polyline |
 | Ellipse | Yes (flattened to a polyline) | Saved as a polyline |
 | Linear dimension | No | Saved as three plain lines |
+| Layers | Name, color, on/off and lock state | Name, color and on/off state |
+| Entity color | ACI and true color | True color is saved as the nearest ACI color |
 
+The layer lock state is not saved to the file (a limitation of the `dxf` crate), so layers come back unlocked when you reopen it.
 Other entity types (hatch, solid, text, block inserts, tables, ...) are skipped when opening a file.
 
 ## Installation
@@ -129,6 +133,7 @@ Type commands in the command bar at the bottom:
 | `tr`, `trim` | Trim tool |
 | `ex`, `extend` | Extend tool |
 | `del`, `delete`, `erase` | Delete the selected objects |
+| `la`, `layer`, `layers` | Show or hide the Layers panel |
 | `ar`, `array` | Rectangular array |
 | `fit` | Zoom to fit |
 | `z` | Zoom in at cursor |
@@ -143,6 +148,15 @@ Type commands in the command bar at the bottom:
 - **Trim**: click the part of an object to remove. Every other object acts as a cutting edge. A circle needs two cutting edges.
 - **Extend**: click near the end of a line, arc or polyline to extend it to the nearest boundary.
 - Objects that only touch at an endpoint do not count as crossing.
+
+## Layers
+
+Open the panel with the layers button in the right dock (or type `la`).
+
+- **Eye**: show or hide a layer. Hidden layers can't be picked or selected, and they are ignored by object snap and by Trim/Extend.
+- **Lock**: locked layers stay visible and snappable (and still act as cutting edges), but their objects can't be selected or edited. The lock state is not saved to DXF.
+- **Click a name** to make it the current layer. New objects are created on it.
+- Layers, their colors and per-object colors are read from DXF files and written back when you save. Creating, renaming and deleting layers is not available yet.
 
 ## License
 
