@@ -13,6 +13,7 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Grid snapping with adaptive LOD grid
 - Offset (line, circle, arc, polyline) with preview
 - Trim and Extend (line, arc, circle, polyline) with live preview; hold `Shift` to swap between the two
+- Delete the selected objects (`Delete` key or `del` command)
 - Multi-tab support, with an unsaved-changes prompt before closing
 - Open, Save and Save As for DXF files (the file path is remembered per tab); large files open in the background
 - Rectangular array with preview
@@ -110,6 +111,7 @@ cargo run
 | `O` | Offset tool |
 | `T` | Trim tool (`Shift`: extend) |
 | `E` | Extend tool (`Shift`: trim) |
+| `Delete` | Delete the selected objects |
 | `S` | Select mode |
 | `Z` | Zoom to cursor |
 
@@ -126,6 +128,7 @@ Type commands in the command bar at the bottom:
 | `of`, `offset`, `of [dist]` | Offset tool |
 | `tr`, `trim` | Trim tool |
 | `ex`, `extend` | Extend tool |
+| `del`, `delete`, `erase` | Delete the selected objects |
 | `ar`, `array` | Rectangular array |
 | `fit` | Zoom to fit |
 | `z` | Zoom in at cursor |
