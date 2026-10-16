@@ -12,6 +12,17 @@ impl<'a> CairoRenderer<'a> {
     pub fn new(cr: &'a gtk::cairo::Context) -> Self {
         Self { cr }
     }
+
+    /// เลือกสีเส้น: ถูกเลือก = แดงหนา, ปกติ = สีของวัตถุ/layer
+    fn pen(&self, is_selected: bool, color: (f64, f64, f64)) {
+        if is_selected {
+            self.cr.set_source_rgb(1.0, 0.0, 0.0);
+            self.cr.set_line_width(3.0);
+        } else {
+            self.cr.set_source_rgb(color.0, color.1, color.2);
+            self.cr.set_line_width(2.0);
+        }
+    }
 }
 
 impl Renderer for CairoRenderer<'_> {
@@ -19,49 +30,25 @@ impl Renderer for CairoRenderer<'_> {
         let cr = self.cr;
         for cmd in commands {
             match cmd {
-                RenderCommand::Line { x1, y1, x2, y2, is_selected } => {
-                    if is_selected {
-                        cr.set_source_rgb(1.0, 0.0, 0.0);
-                        cr.set_line_width(3.0);
-                    } else {
-                        cr.set_source_rgb(1.0, 1.0, 1.0);
-                        cr.set_line_width(2.0);
-                    }
+                RenderCommand::Line { x1, y1, x2, y2, is_selected, color } => {
+                    self.pen(is_selected, color);
                     cr.move_to(x1, y1);
                     cr.line_to(x2, y2);
                     let _ = cr.stroke();
                 }
-                RenderCommand::Circle { cx, cy, radius, is_selected } => {
-                    if is_selected {
-                        cr.set_source_rgb(1.0, 0.0, 0.0);
-                        cr.set_line_width(3.0);
-                    } else {
-                        cr.set_source_rgb(1.0, 1.0, 1.0);
-                        cr.set_line_width(2.0);
-                    }
+                RenderCommand::Circle { cx, cy, radius, is_selected, color } => {
+                    self.pen(is_selected, color);
                     cr.arc(cx, cy, radius, 0.0, 2.0 * std::f64::consts::PI);
                     let _ = cr.stroke();
                 }
-                RenderCommand::Arc { cx, cy, radius, start_angle, end_angle, is_selected } => {
-                    if is_selected {
-                        cr.set_source_rgb(1.0, 0.0, 0.0);
-                        cr.set_line_width(3.0);
-                    } else {
-                        cr.set_source_rgb(1.0, 1.0, 1.0);
-                        cr.set_line_width(2.0);
-                    }
+                RenderCommand::Arc { cx, cy, radius, start_angle, end_angle, is_selected, color } => {
+                    self.pen(is_selected, color);
                     // แกน Y บนจอกลับด้าน: มุมเปลี่ยนเครื่องหมาย และ CCW ในโลก = arc_negative บนจอ
                     cr.arc_negative(cx, cy, radius, -start_angle, -end_angle);
                     let _ = cr.stroke();
                 }
-                RenderCommand::Polyline { points, closed, is_selected } => {
-                    if is_selected {
-                        cr.set_source_rgb(1.0, 0.0, 0.0);
-                        cr.set_line_width(3.0);
-                    } else {
-                        cr.set_source_rgb(1.0, 1.0, 1.0);
-                        cr.set_line_width(2.0);
-                    }
+                RenderCommand::Polyline { points, closed, is_selected, color } => {
+                    self.pen(is_selected, color);
                     for (i, (x, y)) in points.iter().enumerate() {
                         if i == 0 {
                             cr.move_to(*x, *y);

@@ -20,6 +20,9 @@
     <file>icons/draw-polyline-symbolic.svg</file>
     <file>icons/dot-node-pointer-left-symbolic.svg</file>
     <file>icons/outline-offset-symbolic.svg</file>
+    <file>icons/eraser-symbolic.svg</file>
+    <file>icons/line-trim-symbolic.svg</file>
+    <file>icons/line-extend-symbolic.svg</file>
+    <file>icons/layers-and-objects-symbolic.svg</file>
   </gresource>
 </gresources>
-

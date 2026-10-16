@@ -143,6 +143,12 @@
                   </object>
                 </child>
                 <child>
+                  <object class="GtkButton" id="btn_delete">
+                    <property name="icon-name">eraser-symbolic</property>
+                    <property name="tooltip-text">Delete (Del, Delete)</property>
+                  </object>
+                </child>
+                <child>
                   <object class="GtkButton" id="btn_line">
                     <property name="icon-name">draw-line-symbolic</property>
                     <property name="tooltip-text">Line (L)</property>
@@ -290,6 +296,51 @@
               </object>
             </child>
 
+            <!-- Layer Panel -->
+            <child type="overlay">
+              <object class="GtkRevealer">
+                <property name="halign">end</property>
+                <property name="valign">center</property>
+                <property name="margin-end">72</property>
+                <property name="transition-type">slide-left</property>
+                <property name="transition-duration">250</property>
+                <property name="reveal-child" bind-source="btn_layers" bind-property="active" bind-flags="sync-create"/>
+                <child>
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="spacing">6</property>
+                    <style>
+                      <class name="osd"/>
+                      <class name="toolbar"/>
+                      <class name="drafting-floating"/>
+                    </style>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">Layers</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSeparator"/>
+                    </child>
+                    <child>
+                      <object class="GtkScrolledWindow">
+                        <property name="hscrollbar-policy">never</property>
+                        <property name="propagate-natural-height">true</property>
+                        <property name="max-content-height">320</property>
+                        <property name="min-content-width">240</property>
+                        <child>
+                          <object class="GtkListBox" id="layer_list">
+                            <property name="selection-mode">single</property>
+                            <style><class name="navigation-sidebar"/></style>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+
             <!-- Right Dock -->
             <child type="overlay">
               <object class="GtkStack" id="right_dock">
@@ -312,6 +363,12 @@
                           <class name="drafting-floating"/>
                         </style>
                         <child>
+                          <object class="GtkToggleButton" id="btn_layers">
+                            <property name="icon-name">layers-and-objects-symbolic</property>
+                            <property name="tooltip-text">Layers (type: la)</property>
+                          </object>
+                        </child>
+                        <child>
                           <object class="GtkButton" id="btn_array">
                             <property name="icon-name">grid-filled-symbolic</property>
                             <property name="tooltip-text">Array</property>
@@ -321,6 +378,18 @@
                           <object class="GtkButton" id="btn_offset">
                             <property name="icon-name">outline-offset-symbolic</property>
                             <property name="tooltip-text">Offset (O, or type: of 10)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_trim">
+                            <property name="icon-name">line-trim-symbolic</property>
+                            <property name="tooltip-text">Trim (T)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_extend">
+                            <property name="icon-name">line-extend-symbolic</property>
+                            <property name="tooltip-text">Extend (Shift in Trim mode)</property>
                           </object>
                         </child>
                       </object>

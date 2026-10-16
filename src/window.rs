@@ -129,6 +129,17 @@ mod imp {
         pub revealer_offset_ui: TemplateChild<gtk::Revealer>,
         #[template_child]
         pub btn_offset_cancel: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_delete: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_trim: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_extend: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_layers: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub layer_list: TemplateChild<gtk::ListBox>,
+        pub building_layers: Cell<bool>,
 
         pub current_mode: Cell<crate::engine::ToolMode>,
         pub mouse_pos: Cell<(f64, f64)>,
@@ -136,13 +147,13 @@ mod imp {
         pub snap_enabled: Cell<bool>,
         pub is_dialog_open: Cell<bool>,
         pub pages: RefCell<HashMap<adw::TabPage, RefCell<crate::engine::Engine>>>,
-        pub array_base_pos: Cell<Option<(f64, f64)>>, // จุดเริ่มต้นของ Array
-        pub array_count: Cell<i32>,                   // จำนวนที่จะ copy
+        pub array_base_pos: Cell<Option<(f64, f64)>>,
+        pub array_count: Cell<i32>,
         pub is_cancelling_array: Cell<bool>,
-        pub drag_start: Cell<Option<(f64, f64)>>, // จุดเริ่มลาก (screen)
+        pub drag_start: Cell<Option<(f64, f64)>>,
         pub is_dragging: Cell<bool>,
         pub is_mouse_pressed: Cell<bool>,
-        pub dimension_step: Cell<u8>, // 0: เริ่ม, 1: ได้จุดแรก, 2: ได้จุดสอง (กำลังดึงระยะ)
+        pub dimension_step: Cell<u8>,
         pub dim_temp_start: Cell<Option<Point>>,
         pub dim_temp_end: Cell<Option<Point>>,
         pub auto_pan_enabled: Cell<bool>,
@@ -156,9 +167,9 @@ mod imp {
         pub offset_anim: RefCell<Option<OffsetAnim>>,
         pub offset_fade: Cell<f64>,
         pub last_frame_us: Cell<i64>,
-        pub offset_stable: Cell<Option<(f64, f64)>>, // จุดที่ใช้ตัดสินฝั่งของ ghost ตอนนี้
-        pub offset_k: Cell<f64>,                     // ตัวคูณระยะ 0..1 (1 = เต็ม)
-        pub offset_phase: Cell<u8>,                  // 0 นิ่ง, 1 กำลังหด, 2 กำลังงอก
+        pub offset_stable: Cell<Option<(f64, f64)>>,
+        pub offset_k: Cell<f64>,
+        pub offset_phase: Cell<u8>,
         pub shift_down: Cell<bool>,
     }
 
@@ -259,6 +270,12 @@ mod imp {
                     // Cancel Action: Esc
                     if key == gdk::Key::Escape {
                         obj.cancel_action(true);
+                        return glib::Propagation::Stop;
+                    }
+
+                    // Delete
+                    if (key == gdk::Key::Delete || key == gdk::Key::KP_Delete) && !typing {
+                        obj.delete_action();
                         return glib::Propagation::Stop;
                     }
 
@@ -479,7 +496,7 @@ mod imp {
                         return glib::Propagation::Proceed;
                     }
                     obj.confirm_close_page(page);
-                    glib::Propagation::Stop // ต้องเรียก close_page_finish เองตอนตอบ dialog
+                    glib::Propagation::Stop
                 }
             ));
 
@@ -694,6 +711,29 @@ mod imp {
                 move |_| obj.cancel_action(false)
             ));
 
+            self.btn_trim.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Trim)
+            ));
+
+            self.btn_extend.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Extend)
+            ));
+
+            self.btn_delete.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    obj.delete_action();
+                    if let Some(page) = obj.imp().tab_view.selected_page() {
+                        page.child().grab_focus();
+                    }
+                }
+            ));
+
             self.cmd_entry.connect_activate(glib::clone!(
                 #[weak]
                 obj,
@@ -761,6 +801,11 @@ mod imp {
                             "pl" | "pline" | "polyline" => obj.set_tool(DrawingMode::Polyline),
                             "tr" | "trim" => obj.set_tool(DrawingMode::Trim),
                             "ex" | "extend" => obj.set_tool(DrawingMode::Extend),
+                            "del" | "delete" | "erase" => obj.delete_action(),
+                            "la" | "layer" | "layers" => {
+                                let b = &obj.imp().btn_layers;
+                                b.set_active(!b.is_active());
+                            }
                             "ar" | "array" => {
                                 let imp = obj.imp();
                                 if let Some(page) = imp.tab_view.selected_page() {
@@ -797,6 +842,26 @@ mod imp {
                     entry.set_text("");
                     if let Some(page) = obj.imp().tab_view.selected_page() {
                         page.child().grab_focus();
+                    }
+                }
+            ));
+
+            self.tab_view.connect_selected_page_notify(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.refresh_layers()
+            ));
+
+            self.layer_list.connect_row_selected(glib::clone!(
+                #[weak]
+                obj,
+                move |_, row| {
+                    if obj.imp().building_layers.get() {
+                        return;
+                    }
+                    if let Some(row) = row {
+                        let i = row.index() as usize;
+                        obj.with_engine(|d| d.set_current_layer(i));
                     }
                 }
             ));
@@ -928,7 +993,7 @@ impl DraftingWindow {
             }
         }
 
-        let buttons: [(&gtk::Button, DrawingMode); 8] = [
+        let buttons: [(&gtk::Button, DrawingMode); 10] = [
             (&imp.btn_select, DrawingMode::Select),
             (&imp.btn_line, DrawingMode::Line),
             (&imp.btn_circle, DrawingMode::Circle),
@@ -937,6 +1002,8 @@ impl DraftingWindow {
             (&imp.btn_dimension, DrawingMode::Dimension),
             (&imp.btn_array, DrawingMode::Array),
             (&imp.btn_offset, DrawingMode::Offset),
+            (&imp.btn_trim, DrawingMode::Trim),
+            (&imp.btn_extend, DrawingMode::Extend),
         ];
 
         for (btn, m) in buttons {
@@ -1000,13 +1067,8 @@ impl DraftingWindow {
                 let pages = imp.pages.borrow();
                 if let Some(d_ref) = pages.get(&page) {
                     let mut d = d_ref.borrow_mut();
-                    let id = d.get_next_id();
                     d.checkpoint();
-                    d.add_element(DrawingElement {
-                        id,
-                        is_selected: false,
-                        data: ElementData::Polyline { points, closed: false },
-                    });
+                    d.push_new(ElementData::Polyline { points, closed: false });
                 }
             }
             page.child().queue_draw();
@@ -1327,10 +1389,8 @@ impl DraftingWindow {
                                 1 => {
                                     imp.dim_temp_end.set(Some(p));
                                     imp.dimension_step.set(2);
-                                    // start_pos ยังคงเป็นจุดแรก — preview จะใช้ mouse เป็น offset
                                 }
                                 2 => {
-                                    // click 3: ยืนยัน offset
                                     if let (Some(start), Some(end)) = (
                                         imp.dim_temp_start.get(),
                                         imp.dim_temp_end.get(),
@@ -1347,13 +1407,8 @@ impl DraftingWindow {
                                         let dmy = wy - start.y;
                                         let offset = dmx * px + dmy * py;
 
-                                        let next_id = d.get_next_id();
                                         d.checkpoint();
-                                        d.add_element(DrawingElement {
-                                            id: next_id,
-                                            is_selected: false,
-                                            data: ElementData::Dimension { start, end, offset },
-                                        });
+                                        d.push_new(ElementData::Dimension { start, end, offset });
                                         // reset
                                         imp.start_pos.set(None);
                                         imp.dimension_step.set(0);
@@ -1378,18 +1433,8 @@ impl DraftingWindow {
                                 if let Some((center, radius, s, e)) =
                                     arc_from_three_points(pts[0], pts[1], pts[2])
                                 {
-                                    let id = d.get_next_id();
                                     d.checkpoint();
-                                    d.add_element(DrawingElement {
-                                        id,
-                                        is_selected: false,
-                                        data: ElementData::Arc {
-                                            center,
-                                            radius,
-                                            start_angle: s,
-                                            end_angle: e,
-                                        },
-                                    });
+                                    d.push_new(ElementData::Arc { center, radius, start_angle: s, end_angle: e });
                                 }
                                 pts.clear();
                             }
@@ -1409,13 +1454,8 @@ impl DraftingWindow {
                             };
                             if close {
                                 let points: Vec<Point> = pts.drain(..).collect();
-                                let id = d.get_next_id();
                                 d.checkpoint();
-                                d.add_element(DrawingElement {
-                                    id,
-                                    is_selected: false,
-                                    data: ElementData::Polyline { points, closed: true },
-                                });
+                                d.push_new(ElementData::Polyline { points, closed: true });
                             } else if pts
                                 .last()
                                 .map_or(true, |l| (l.x - p.x).hypot(l.y - p.y) > 1e-9)
@@ -1533,15 +1573,10 @@ impl DraftingWindow {
 
                         match imp.current_mode.get() {
                             DrawingMode::Line => {
-                                let next_id = d.get_next_id();
                                 d.checkpoint();
-                                d.add_element(DrawingElement {
-                                    id: next_id,
-                                    is_selected: false,
-                                    data: ElementData::Line {
-                                        start: Point { x: sx, y: sy },
-                                        end: Point { x: ex, y: ey },
-                                    },
+                                d.push_new(ElementData::Line {
+                                    start: Point { x: sx, y: sy },
+                                    end: Point { x: ex, y: ey },
                                 });
                                 imp.start_pos.set(Some((ex, ey)));
                             }
@@ -1549,15 +1584,10 @@ impl DraftingWindow {
                                 let dx = ex - sx;
                                 let dy = ey - sy;
                                 let radius = (dx * dx + dy * dy).sqrt();
-                                let next_id = d.get_next_id();
                                 d.checkpoint();
-                                d.add_element(DrawingElement {
-                                    id: next_id,
-                                    is_selected: false,
-                                    data: ElementData::Circle {
-                                        center: Point { x: sx, y: sy },
-                                        radius,
-                                    },
+                                d.push_new(ElementData::Circle {
+                                    center: Point { x: sx, y: sy },
+                                    radius,
                                 });
                                 imp.start_pos.set(None);
                             }
@@ -2029,8 +2059,9 @@ impl DraftingWindow {
         };
 
         let txt = format!(
-            "MODE: [{}]  X: {:.2} Y: {:.2} {}{}{}",
+            "MODE: [{}]  LAYER: {}  X: {:.2} Y: {:.2} {}{}{}",
             mode_text,
+            d.layers[d.current_layer].name,
             sn_x,
             sn_y,
             if imp.snap_enabled.get() { "[SNAP]" } else { "" },
@@ -2070,20 +2101,145 @@ impl DraftingWindow {
         }
     }
 
-    pub fn undo_action(&self) {
-        // 1. ดึงหน้าปัจจุบัน (page) ที่กำลังเปิดอยู่ขึ้นมา
+    pub fn delete_action(&self) {
         if let Some(page) = self.imp().tab_view.selected_page() {
-            // 2. ยืม (borrow) HashMap ที่เก็บ Engine (pages) ออกมาจาก RefCell
             let pages = self.imp().pages.borrow();
+            if let Some(d_ref) = pages.get(&page) {
+                d_ref.borrow_mut().delete_selected();
+                page.child().queue_draw();
+            }
+        }
+    }
 
-            // 3. หา Engine ที่ตรงกับหน้าเพจนั้น
+    fn with_engine<R>(&self, f: impl FnOnce(&mut crate::engine::Engine) -> R) -> Option<R> {
+        let imp = self.imp();
+        let page = imp.tab_view.selected_page()?;
+        let pages = imp.pages.borrow();
+        let d_ref = pages.get(&page)?;
+        let r = f(&mut d_ref.borrow_mut());
+        page.child().queue_draw();
+        Some(r)
+    }
+
+    pub fn refresh_layers(&self) {
+        let imp = self.imp();
+        imp.building_layers.set(true);
+        while let Some(row) = imp.layer_list.first_child() {
+            imp.layer_list.remove(&row);
+        }
+
+        let snapshot = imp.tab_view.selected_page().and_then(|page| {
+            let pages = imp.pages.borrow();
+            pages.get(&page).map(|d| {
+                let d = d.borrow();
+                (d.layers.clone(), d.current_layer)
+            })
+        });
+        let Some((layers, current)) = snapshot else {
+            imp.building_layers.set(false);
+            return;
+        };
+
+        let eye_icon = |on: bool| if on { "view-reveal-symbolic" } else { "view-conceal-symbolic" };
+        let lock_icon = |on: bool| if on { "changes-prevent-symbolic" } else { "changes-allow-symbolic" };
+
+        for (i, l) in layers.iter().enumerate() {
+            let row = gtk::ListBoxRow::new();
+            let hb = gtk::Box::builder()
+                .spacing(6)
+                .margin_start(4)
+                .margin_end(4)
+                .margin_top(2)
+                .margin_bottom(2)
+                .build();
+
+            let dot = gtk::DrawingArea::builder()
+                .content_width(14)
+                .content_height(14)
+                .valign(gtk::Align::Center)
+                .build();
+            let rgb = l.color;
+            dot.set_draw_func(move |_, cr, w, h| {
+                cr.set_source_rgb(rgb.0 as f64 / 255.0, rgb.1 as f64 / 255.0, rgb.2 as f64 / 255.0);
+                cr.arc(w as f64 / 2.0, h as f64 / 2.0, (w.min(h) as f64) / 2.0, 0.0, std::f64::consts::TAU);
+                let _ = cr.fill();
+            });
+
+            let name = gtk::Label::builder()
+                .label(&l.name)
+                .xalign(0.0)
+                .hexpand(true)
+                .halign(gtk::Align::Fill)
+                .width_chars(14)
+                .max_width_chars(24)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .build();
+
+            let eye = gtk::ToggleButton::builder()
+                .icon_name(eye_icon(l.visible))
+                .active(l.visible)
+                .tooltip_text("Show / hide")
+                .css_classes(["flat"])
+                .build();
+
+            let hb_row = hb.clone();
+            eye.connect_toggled(glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |b| {
+                    b.set_icon_name(eye_icon(b.is_active()));
+                    hb_row.set_opacity(if b.is_active() { 1.0 } else { 0.45 });
+                    obj.with_engine(|d| d.set_layer_visible(i, b.is_active()));
+                }
+            ));
+
+            let lock = gtk::ToggleButton::builder()
+                .icon_name(lock_icon(l.locked))
+                .active(l.locked)
+                .tooltip_text("Lock / unlock")
+                .css_classes(["flat"])
+                .build();
+            lock.connect_toggled(glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |b| {
+                    b.set_icon_name(lock_icon(b.is_active()));
+                    obj.with_engine(|d| d.set_layer_locked(i, b.is_active()));
+                    if b.is_active() { b.add_css_class("layer-locked") } else { b.remove_css_class("layer-locked") }
+                    if b.is_active() {
+                        b.add_css_class("layer-locked");
+                    } else {
+                        b.remove_css_class("layer-locked");
+                    }
+                }
+            ));
+
+            let btns = gtk::Box::builder()
+                .css_classes(["linked"])
+                .halign(gtk::Align::End)
+                .build();
+            btns.append(&eye);
+            btns.append(&lock);
+
+            hb.append(&dot);
+            hb.append(&name);
+            hb.append(&btns);
+
+            row.set_child(Some(&hb));
+            imp.layer_list.append(&row);
+            if i == current {
+                imp.layer_list.select_row(Some(&row));
+            }
+        }
+        imp.building_layers.set(false);
+    }
+
+    pub fn undo_action(&self) {
+        if let Some(page) = self.imp().tab_view.selected_page() {
+            let pages = self.imp().pages.borrow();
             if let Some(d_ref) = pages.get(&page) {
                 let mut d = d_ref.borrow_mut();
-
-                // 4. เรียกใช้ชื่อใหม่ที่เราแก้ไปใน engine.rs
                 d.undo_last_action();
-
-                // 5. สั่งให้หน้าจอนั้นวาดใหม่ (ตอนนี้มีตัวแปร page แล้ว)
                 page.child().queue_draw();
             }
         }
@@ -2232,7 +2388,6 @@ impl DraftingWindow {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Untitled".to_string());
 
-            // อ่านไฟล์ใน thread แยก หน้าต่างจะไม่ค้าง
             let p = path.clone();
             let result = gio::spawn_blocking(move || {
                 acadrust::DxfReader::from_file(&p)
@@ -2242,7 +2397,7 @@ impl DraftingWindow {
             })
             .await;
 
-            let (elements, skipped) = match result {
+            let imported = match result {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
                     eprintln!("Error opening {:?}: {}", path, e);
@@ -2257,6 +2412,7 @@ impl DraftingWindow {
                     return;
                 }
             };
+            let skipped = imported.skipped;
 
             obj.create_new_tab(&title);
             let Some(page) = obj.imp().tab_view.selected_page() else { return };
@@ -2264,13 +2420,16 @@ impl DraftingWindow {
                 let pages = obj.imp().pages.borrow();
                 let Some(d_ref) = pages.get(&page) else { return };
                 let mut d = d_ref.borrow_mut();
-                for data in elements {
-                    let id = d.get_next_id();
-                    d.add_element(DrawingElement { id, is_selected: false, data });
+                d.layers = imported.layers;
+                d.current_layer = 0;
+                for (data, layer, color) in imported.items {
+                    d.push_imported(data, layer, color);
                 }
                 d.file_path = Some(path.clone());
                 d.dirty = false;
             }
+            obj.refresh_layers();
+
             if skipped > 0 {
                 eprintln!("Skipped {} unsupported entities", skipped);
             }
@@ -2564,13 +2723,50 @@ fn dxf_filters() -> (gtk::FileFilter, gio::ListStore, gtk::FileFilter) {
     (f.clone(), list, f)
 }
 
-fn dxf_to_elements(doc: &acadrust::CadDocument) -> (Vec<ElementData>, usize) {
+type Rgb = (u8, u8, u8);
+
+struct Imported {
+    layers: Vec<crate::engine::Layer>,
+    items: Vec<(ElementData, usize, Option<Rgb>)>,
+    skipped: usize,
+}
+
+fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
+    use crate::engine::Layer;
     use acadrust::EntityType;
-    let mut out = Vec::new();
+    use std::collections::HashMap;
+    let mut layers: Vec<Layer> = vec![Layer::new("0", (255, 255, 255))];
+    let mut index: HashMap<String, usize> = HashMap::from([("0".to_string(), 0)]);
+    for l in doc.layers.iter() {
+        let color = l.color.rgb().unwrap_or((255, 255, 255));
+        let (visible, locked) = (l.is_visible(), l.is_locked());
+        match index.get(&l.name.to_lowercase()) {
+            Some(&i) => {
+                layers[i].color = color;
+                layers[i].visible = visible;
+                layers[i].locked = locked;
+            }
+            None => {
+                index.insert(l.name.to_lowercase(), layers.len());
+                layers.push(Layer { name: l.name.clone(), color, visible, locked });
+            }
+        }
+    }
+
+    let mut items = Vec::new();
     let mut skipped = 0usize;
 
-    // model_space_entities
     for e in doc.model_space_entities() {
+        let c = e.common();
+        let lname = if c.layer.is_empty() { "0" } else { c.layer.as_str() };
+        let li = *index.entry(lname.to_lowercase()).or_insert_with(|| {
+            layers.push(Layer::new(lname, (255, 255, 255)));
+            layers.len() - 1
+        });
+        // ByLayer / ByBlock → None (ใช้สีของ layer), Index / Rgb → สีของวัตถุเอง
+        let col = c.color.rgb();
+
+        let mut out: Vec<ElementData> = Vec::new();
         match e {
             EntityType::Line(l) => out.push(ElementData::Line {
                 start: Point { x: l.start.x, y: l.start.y },
@@ -2636,64 +2832,97 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> (Vec<ElementData>, usize) {
             }
             _ => skipped += 1,
         }
+        for data in out {
+            items.push((data, li, col));
+        }
     }
-    (out, skipped)
+    Imported { layers, items, skipped }
+}
+
+fn aci_of(c: Rgb) -> u8 {
+    acadrust::Color::Rgb { r: c.0, g: c.1, b: c.2 }
+        .approximate_index()
+        .clamp(1, 255) as u8
 }
 
 fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> {
     let mut drawing = dxf::Drawing::new();
-    let add_line = |drawing: &mut dxf::Drawing, a: Point, b: Point| {
-        let line = dxf::entities::Line {
-            p1: dxf::Point::new(a.x, a.y, 0.0),
-            p2: dxf::Point::new(b.x, b.y, 0.0),
-            ..Default::default()
-        };
-        drawing.add_entity(dxf::entities::Entity::new(dxf::entities::EntityType::Line(line)));
-    };
+    for l in &data.layers {
+        let color = dxf::Color::from_index(aci_of(l.color));
+        if let Some(ex) = drawing.layers_mut().find(|x| x.name.eq_ignore_ascii_case(&l.name)) {
+            ex.color = color;
+            ex.is_layer_on = l.visible;
+        } else {
+            drawing.add_layer(dxf::tables::Layer {
+                name: l.name.clone(),
+                color,
+                is_layer_on: l.visible,
+                ..Default::default()
+            });
+        }
+    }
 
     for el in data.get_all_elements() {
+        let layer_name = data.layers[el.layer].name.clone();
+        let color = el.color.map(|c| dxf::Color::from_index(aci_of(c)));
+        // ใส่ชื่อ layer + สี (ถ้ามี) ให้ทุก entity ที่เขียนออก
+        let put = |drawing: &mut dxf::Drawing, et: dxf::entities::EntityType| {
+            let mut e = dxf::entities::Entity::new(et);
+            e.common.layer = layer_name.clone();
+            if let Some(c) = &color {
+                e.common.color = c.clone();
+            }
+            drawing.add_entity(e);
+        };
+        let put_line = |drawing: &mut dxf::Drawing, a: Point, b: Point| {
+            put(
+                drawing,
+                dxf::entities::EntityType::Line(dxf::entities::Line {
+                    p1: dxf::Point::new(a.x, a.y, 0.0),
+                    p2: dxf::Point::new(b.x, b.y, 0.0),
+                    ..Default::default()
+                }),
+            );
+        };
+
         match &el.data {
-            ElementData::Line { start, end } => add_line(&mut drawing, *start, *end),
-            ElementData::Circle { center, radius } => {
-                let circle = dxf::entities::Circle {
+            ElementData::Line { start, end } => put_line(&mut drawing, *start, *end),
+            ElementData::Circle { center, radius } => put(
+                &mut drawing,
+                dxf::entities::EntityType::Circle(dxf::entities::Circle {
                     center: dxf::Point::new(center.x, center.y, 0.0),
                     radius: *radius,
                     ..Default::default()
-                };
-                drawing.add_entity(dxf::entities::Entity::new(
-                    dxf::entities::EntityType::Circle(circle),
-                ));
-            }
+                }),
+            ),
             ElementData::Dimension { start, end, offset } => {
                 if let Some(g) = linear_dimension_geometry(*start, *end, *offset) {
-                    add_line(&mut drawing, g.start, g.dim_from);
-                    add_line(&mut drawing, g.end, g.dim_to);
-                    add_line(&mut drawing, g.dim_from, g.dim_to);
+                    put_line(&mut drawing, g.start, g.dim_from);
+                    put_line(&mut drawing, g.end, g.dim_to);
+                    put_line(&mut drawing, g.dim_from, g.dim_to);
                 }
             }
-            ElementData::Arc { center, radius, start_angle, end_angle } => {
-                let arc = dxf::entities::Arc {
+            ElementData::Arc { center, radius, start_angle, end_angle } => put(
+                &mut drawing,
+                dxf::entities::EntityType::Arc(dxf::entities::Arc {
                     center: dxf::Point::new(center.x, center.y, 0.0),
                     radius: *radius,
                     start_angle: start_angle.to_degrees().rem_euclid(360.0),
                     end_angle: end_angle.to_degrees().rem_euclid(360.0),
                     ..Default::default()
-                };
-                drawing.add_entity(dxf::entities::Entity::new(dxf::entities::EntityType::Arc(arc)));
-            }
-            ElementData::Polyline { points, closed } => {
-                let lw = dxf::entities::LwPolyline {
+                }),
+            ),
+            ElementData::Polyline { points, closed } => put(
+                &mut drawing,
+                dxf::entities::EntityType::LwPolyline(dxf::entities::LwPolyline {
                     vertices: points
                         .iter()
                         .map(|p| dxf::LwPolylineVertex { x: p.x, y: p.y, ..Default::default() })
                         .collect(),
                     flags: if *closed { 1 } else { 0 },
                     ..Default::default()
-                };
-                drawing.add_entity(dxf::entities::Entity::new(
-                    dxf::entities::EntityType::LwPolyline(lw),
-                ));
-            }
+                }),
+            ),
         }
     }
 

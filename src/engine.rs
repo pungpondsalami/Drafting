@@ -145,9 +145,11 @@ impl Default for ArraySettings {
 
 #[derive(Debug, Clone)]
 pub struct DrawingElement {
-    pub id: u64,           // ต้องมี ID ประจำตัว
-    pub is_selected: bool, // ไว้เช็คว่ากำลังถูกเลือกอยู่ไหม
-    pub data: ElementData, // เก็บข้อมูลเฉพาะ
+    pub id: u64,
+    pub is_selected: bool,
+    pub layer: usize,
+    pub color: Option<Rgb>,
+    pub data: ElementData,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +206,22 @@ impl From<(f64, f64)> for Point {
     }
 }
 
+pub type Rgb = (u8, u8, u8);
+
+#[derive(Debug, Clone)]
+pub struct Layer {
+    pub name: String,
+    pub color: Rgb,
+    pub visible: bool,
+    pub locked: bool,
+}
+
+impl Layer {
+    pub fn new(name: &str, color: Rgb) -> Self {
+        Self { name: name.to_string(), color, visible: true, locked: false }
+    }
+}
+
 #[derive(Debug)]
 pub struct Camera {
     pub scale: f64,
@@ -221,12 +239,14 @@ pub enum RenderCommand {
         x2: f64,
         y2: f64,
         is_selected: bool,
+        color: (f64, f64, f64),
     },
     Circle {
         cx: f64,
         cy: f64,
         radius: f64,
         is_selected: bool,
+        color: (f64, f64, f64),
     },
     Dimension {
         text_x: f64,
@@ -247,11 +267,13 @@ pub enum RenderCommand {
         start_angle: f64,
         end_angle: f64,
         is_selected: bool,
+        color: (f64, f64, f64),
     },
     Polyline {
         points: Vec<(f64, f64)>,
         closed: bool,
         is_selected: bool,
+        color: (f64, f64, f64),
     },
 }
 
@@ -386,40 +408,26 @@ impl Camera {
     }
 
     pub fn focus_on_area(&mut self, min_p: Point, max_p: Point, screen_size: (f64, f64)) {
-        // 1. หาจุดกึ่งกลางของวัตถุทั้งหมดในโลก
         let center_world = ((min_p.x + max_p.x) / 2.0, (min_p.y + max_p.y) / 2.0);
-
-        // 2. คำนวณ Scale โดยเผื่อ Margin 10% (0.9)
         let world_w = (max_p.x - min_p.x).max(1.0); // กันหารศูนย์
         let world_h = (max_p.y - min_p.y).max(1.0);
-
         let scale_x = (screen_size.0 * 0.9) / world_w;
         let scale_y = (screen_size.1 * 0.9) / world_h;
         self.target_scale = scale_x.min(scale_y);
-
-        // 3. คำนวณ Offset ใหม่ให้ตรงกลางพอดีเป๊ะ
         self.target_offset.0 = (screen_size.0 / 2.0) - (center_world.0 * self.target_scale);
-
-        // สำหรับ Y-Up: Center Screen + (World Y * Scale)
         self.target_offset.1 = (screen_size.1 / 2.0) + (center_world.1 * self.target_scale);
     }
 
     pub fn zoom_in_at(&mut self, screen_x: f64, screen_y: f64) {
-        // ใช้ค่า target ในการคำนวณ เพื่อให้พิกัดโลกนิ่งที่สุด
         let (wx, wy) = self.screen_to_world_target(screen_x, screen_y);
-
         self.target_scale = (self.target_scale * 1.2).min(50.0);
-
-        // ล็อกตำแหน่งเดิม (wx, wy) ให้อยู่ที่พิกัดจอเดิม (screen_x, screen_y)
         self.target_offset.0 = screen_x - (wx * self.target_scale);
         self.target_offset.1 = screen_y - (-wy * self.target_scale);
     }
 
     pub fn zoom_out_at(&mut self, screen_x: f64, screen_y: f64) {
         let (wx, wy) = self.screen_to_world_target(screen_x, screen_y);
-
         self.target_scale = (self.target_scale / 1.2).max(0.01);
-
         self.target_offset.0 = screen_x - (wx * self.target_scale);
         self.target_offset.1 = screen_y - (-wy * self.target_scale);
     }
@@ -431,15 +439,10 @@ impl Camera {
         screen_size: (f64, f64),
         factor: f64,
     ) {
-        // 1. ตั้งสเกลเป้าหมายใหม่
         self.target_scale *= factor;
         self.target_scale = self.target_scale.clamp(0.1, 10.0);
-
-        // 2. คำนวณจุดกึ่งกลางหน้าจอ
         let center_x = screen_size.0 / 2.0;
         let center_y = screen_size.1 / 2.0;
-
-        // 3. ตั้งเป้าหมาย Offset ให้จุดพิกัดโลก (world_x, world_y) มาอยู่กลางจอพอดี
         self.target_offset = (
             center_x - (world_x * self.target_scale),
             center_y - (world_y * self.target_scale),
@@ -463,12 +466,14 @@ pub struct Engine {
     pub redo_stack: Vec<Vec<DrawingElement>>,
     pub file_path: Option<PathBuf>,
     pub dirty: bool,
+    pub layers: Vec<Layer>,
+    pub current_layer: usize,
 }
 
 impl Engine {
     pub fn new() -> Self {
         Self {
-            spatial_index: SpatialIndex::new(8), // หนึ่งกิ่งเก็บได้ 8 ชิ้น
+            spatial_index: SpatialIndex::new(8),
             history: Vec::new(),
             camera: Camera::new(),
             active_tool: ToolMode::Line,
@@ -482,10 +487,11 @@ impl Engine {
             redo_stack: Vec::new(),
             file_path: None,
             dirty: false,
+            layers: vec![Layer::new("0", (255, 255, 255))],
+            current_layer: 0,
         }
     }
 
-    /// ชิ้นงานที่เส้นอยู่ใกล้เมาส์ที่สุด (ภายใน 6px) ถ้าเท่ากันเลือกชิ้นที่วาดทีหลัง
     fn pick_at(&self, wx: f64, wy: f64) -> Option<u64> {
         let tol = 6.0 / self.camera.scale;
         let query_box = BoundingBox {
@@ -501,6 +507,9 @@ impl Engine {
         let mut best: Option<(f64, u64)> = None;
         for id in hits.into_iter().copied() {
             let Some(i) = self.index_of(id) else { continue };
+            if !self.pickable(i) {
+                continue;
+            }
             let d = self.history[i].data.distance_to(p);
             if d > tol {
                 continue;
@@ -533,7 +542,6 @@ impl Engine {
         self.hovered_id = self.pick_at(world_x, world_y);
     }
 
-    /// คลิกเลือกต้นแบบสำหรับ Offset (ไม่รับ Dimension) คืน id ถ้าเลือกได้
     pub fn offset_pick(&mut self, wx: f64, wy: f64) -> Option<u64> {
         let id = self.pick_at(wx, wy)?;
         let i = self.index_of(id)?;
@@ -545,66 +553,79 @@ impl Engine {
         Some(id)
     }
 
-    /// ตัวอย่างผลลัพธ์ตามตำแหน่งเมาส์ (ใช้วาดเงา)
     pub fn offset_preview(&self, id: u64, side: Point, dist: f64) -> Option<ElementData> {
         let i = self.index_of(id)?;
         offset_data(&self.history[i].data, side, dist).ok()
     }
 
-    /// สร้างสำเนา offset ไปด้านที่ side ชี้อยู่
     pub fn offset_apply(&mut self, id: u64, side: Point, dist: f64) -> Result<(), &'static str> {
         let i = self.index_of(id).ok_or("Object no longer exists")?;
         let data = offset_data(&self.history[i].data, side, dist)?;
+        let (layer, color) = (self.history[i].layer, self.history[i].color);
         self.checkpoint();
-        let new_id = self.get_next_id();
-        self.add_element(DrawingElement { id: new_id, is_selected: false, data });
+        let id = self.get_next_id();
+        self.add_element(DrawingElement { id, is_selected: false, layer, color, data });
         Ok(())
     }
 
-    fn other_prims(&self, skip_id: u64) -> Vec<Prim> {
-        self.history.iter().filter(|e| e.id != skip_id).flat_map(|e| prims(&e.data)).collect()
+    fn cutters_in(&self, skip_id: u64, area: &BoundingBox) -> Vec<Prim> {
+        let mut hits = Vec::new();
+        self.spatial_index.query(area, &mut hits);
+        hits.into_iter()
+            .copied()
+            .filter(|&id| id != skip_id)
+            .filter_map(|id| self.index_of(id))
+            .filter(|&i| self.layer_visible(i))
+            .flat_map(|i| prims(&self.history[i].data))
+            .collect()
     }
 
-    /// คลิกส่วนที่จะตัดทิ้ง (เส้นตัด = วัตถุอื่นทั้งหมด)
-    pub fn trim_at(&mut self, wx: f64, wy: f64) -> Result<(), &'static str> {
-        let Some(id) = self.pick_at(wx, wy) else {
-            eprintln!("trim: nothing under the cursor at ({:.3}, {:.3})", wx, wy);
-            return Err("Click on an object to trim");
+    fn trim_cutters(&self, id: u64, i: usize) -> Vec<Prim> {
+        let b = self.history[i].bounding_box();
+        let pad = 1e-6 * (1.0 + (b.max_x - b.min_x).max(b.max_y - b.min_y));
+        let area = BoundingBox {
+            min_x: b.min_x - pad,
+            min_y: b.min_y - pad,
+            max_x: b.max_x + pad,
+            max_y: b.max_y + pad,
         };
+        self.cutters_in(id, &area)
+    }
+
+    fn extend_cutters(&self, id: u64, i: usize) -> (Vec<Prim>, f64) {
+        let diag = self
+            .get_elements_bounds()
+            .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
+            .unwrap_or(0.0);
+        let reach = diag + 1.0;
+        let cutters = match extend_area(&self.history[i].data, reach) {
+            Some(area) => self.cutters_in(id, &area),
+            None => Vec::new(),
+        };
+        (cutters, reach)
+    }
+
+    pub fn trim_at(&mut self, wx: f64, wy: f64) -> Result<(), &'static str> {
+        let id = self.pick_at(wx, wy).ok_or("Click on an object to trim")?;
         let i = self.index_of(id).ok_or("Object no longer exists")?;
-        let cutters = self.other_prims(id);
-        let result = trim_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters);
-        eprintln!(
-            "trim: id {} {:?} | {} cutting prims | {}",
-            id,
-            self.history[i].data,
-            cutters.len(),
-            match &result {
-                Ok((k, _)) => format!("ok, {} piece(s) kept", k.len()),
-                Err(e) => e.to_string(),
-            }
-        );
-        let (pieces, _) = result?;
+        let cutters = self.trim_cutters(id, i);
+        let (pieces, _) = trim_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters)?;
+        let (layer, color) = (self.history[i].layer, self.history[i].color);
         self.checkpoint();
         self.history.remove(i);
         for data in pieces {
             let nid = self.get_next_id();
-            self.history.push(DrawingElement { id: nid, is_selected: false, data });
+            self.history.push(DrawingElement { id: nid, is_selected: false, layer, color, data });
         }
         self.rebuild_index();
         Ok(())
     }
 
-    /// คลิกใกล้ปลายที่จะยืดไปชนเส้นขอบ
     pub fn extend_at(&mut self, wx: f64, wy: f64) -> Result<(), &'static str> {
         let id = self.pick_at(wx, wy).ok_or("Click on an object to extend")?;
         let i = self.index_of(id).ok_or("Object no longer exists")?;
-        let diag = self
-            .get_elements_bounds()
-            .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
-            .unwrap_or(0.0);
-        let cutters = self.other_prims(id);
-        let (new, _) = extend_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters, diag * 4.0 + 1000.0)?;
+        let (cutters, reach) = self.extend_cutters(id, i);
+        let (new, _) = extend_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters, reach)?;
         self.checkpoint();
         self.history[i].data = new;
         self.rebuild_index();
@@ -614,21 +635,29 @@ impl Engine {
     pub fn trim_preview(&self, wx: f64, wy: f64) -> Option<ElementData> {
         let id = self.pick_at(wx, wy)?;
         let i = self.index_of(id)?;
-        let cutters = self.other_prims(id);
+        let cutters = self.trim_cutters(id, i);
         trim_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters).ok().map(|(_, r)| r)
     }
 
     pub fn extend_preview(&self, wx: f64, wy: f64) -> Option<ElementData> {
         let id = self.pick_at(wx, wy)?;
         let i = self.index_of(id)?;
-        let diag = self
-            .get_elements_bounds()
-            .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
-            .unwrap_or(0.0);
-        let cutters = self.other_prims(id);
-        extend_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters, diag * 4.0 + 1000.0)
+        let (cutters, reach) = self.extend_cutters(id, i);
+        extend_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters, reach)
             .ok()
             .map(|(_, a)| a)
+    }
+
+    pub fn delete_selected(&mut self) -> usize {
+        let n = self.history.iter().filter(|e| e.is_selected).count();
+        if n == 0 {
+            return 0;
+        }
+        self.checkpoint();
+        self.history.retain(|e| !e.is_selected);
+        self.hovered_id = None;
+        self.rebuild_index();
+        n
     }
 
     pub fn select_in_box(
@@ -654,6 +683,9 @@ impl Engine {
 
         for id in hit_ids {
             let Some(i) = self.index_of(id) else { continue };
+            if !self.pickable(i) {
+                continue;
+            }
             let el = &mut self.history[i];
             let hit = if crossing {
                 el.data.touches_rect(&sel_box)
@@ -690,14 +722,13 @@ impl Engine {
         self.spatial_index = idx;
     }
 
-    /// เรียก "ก่อน" แก้ไขอะไรก็ตามที่ต้อง undo ได้ (วาด, ย้าย, array)
     pub fn checkpoint(&mut self) {
         self.dirty = true;
         self.undo_stack.push(self.history.clone());
         if self.undo_stack.len() > Self::MAX_UNDO {
             self.undo_stack.remove(0);
         }
-        self.redo_stack.clear(); // มี action ใหม่ → redo เดิมใช้ไม่ได้แล้ว
+        self.redo_stack.clear();
     }
 
     pub fn undo_last_action(&mut self) {
@@ -728,14 +759,11 @@ impl Engine {
     }
 
     pub fn move_and_snap_selected(&mut self, dx: f64, dy: f64, snap_enabled: bool) {
-        // ย้ายก่อน
         self.move_selected(dx, dy);
-
         if !snap_enabled {
             return;
         }
 
-        // หา reference point (จุดแรกของ selected object)
         let ref_point = self
             .history
             .iter()
@@ -746,12 +774,9 @@ impl Engine {
             });
 
         if let Some((rx, ry)) = ref_point {
-            // snap reference point
             let (snx, sny) = self.get_snapped_pos(rx, ry, snap_enabled);
             let snap_dx = snx - rx;
             let snap_dy = sny - ry;
-
-            // ถ้า snap offset มีนัยสำคัญ ให้ move ทุกตัวตาม snap offset
             if snap_dx.abs() > 0.001 || snap_dy.abs() > 0.001 {
                 self.move_selected(snap_dx, snap_dy);
             }
@@ -776,8 +801,8 @@ impl Engine {
         &self,
         rows: i32,
         cols: i32,
-        _dx: f64, // ไม่ใช้ค่าตรงจาก UI แล้ว
-        _dy: f64, // ไม่ใช้ค่าตรงจาก UI แล้ว
+        _dx: f64,
+        _dy: f64,
     ) -> Vec<RenderCommand> {
         let mut previews = Vec::new();
         // ใช้ค่า anim จาก engine แทนเพื่อความนุ่มนวล
@@ -797,48 +822,42 @@ impl Engine {
                     continue;
                 }
 
-                // วาดเงาโดยใช้ระยะห่างที่กำลังเล่น Animation อยู่
                 let offset_x = c as f64 * anim_dx;
                 let offset_y = r as f64 * anim_dy;
 
                 for el in &selected_elements {
                     match &el.data {
                         ElementData::Line { start, end } => {
-                            // คำนวณจุดศูนย์กลางของเส้นเพื่อให้มันขยายออกจากกลางเส้น
                             let mid_x = (start.x + end.x) / 2.0;
                             let mid_y = (start.y + end.y) / 2.0;
-                            let s = self.array_settings.anim_scale; // 0.0 -> 1.0
-
-                            // ปรับตำแหน่งจุดเริ่มและจบให้ขยายออกจากจุดศูนย์กลางตาม anim_scale
+                            let s = self.array_settings.anim_scale;
                             let new_start_x = mid_x + (start.x - mid_x) * s + offset_x;
                             let new_start_y = mid_y + (start.y - mid_y) * s + offset_y;
                             let new_end_x = mid_x + (end.x - mid_x) * s + offset_x;
                             let new_end_y = mid_y + (end.y - mid_y) * s + offset_y;
-
                             let s_screen = self.camera.world_to_screen(new_start_x, new_start_y);
                             let e_screen = self.camera.world_to_screen(new_end_x, new_end_y);
-
                             previews.push(RenderCommand::Line {
                                 x1: s_screen.0,
                                 y1: s_screen.1,
                                 x2: e_screen.0,
                                 y2: e_screen.1,
                                 is_selected: true,
+                                color: (1.0, 1.0, 1.0),
                             });
                         }
                         ElementData::Circle { center, radius } => {
                             let c = self
                                 .camera
                                 .world_to_screen(center.x + offset_x, center.y + offset_y);
-                            // คูณ anim_scale เข้าไปเพื่อให้มันมี animation ขยายตัว
                             let r_screen =
                                 radius * self.camera.scale * self.array_settings.anim_scale;
-
                             previews.push(RenderCommand::Circle {
                                 cx: c.0,
                                 cy: c.1,
                                 radius: r_screen,
                                 is_selected: true,
+                                color: (1.0, 1.0, 1.0),
                             });
                         }
                         ElementData::Arc { center, radius, start_angle, end_angle } => {
@@ -852,6 +871,7 @@ impl Engine {
                                 start_angle: *start_angle,
                                 end_angle: *end_angle,
                                 is_selected: true,
+                                color: (1.0, 1.0, 1.0),
                             });
                         }
                         ElementData::Polyline { points, closed } => {
@@ -865,6 +885,7 @@ impl Engine {
                                 points: pts,
                                 closed: *closed,
                                 is_selected: true,
+                                color: (1.0, 1.0, 1.0),
                             });
                         }
                         ElementData::Dimension { .. } => {
@@ -904,18 +925,14 @@ impl Engine {
             }
         }
 
-        // เก็บ id ลำดับการโผล่ตาม row/col
         let reveal_order: Vec<u64> = new_elements.iter().map(|e| e.id).collect();
         let total = reveal_order.len() as i32;
 
         for el in new_elements {
             self.add_element(el);
         }
-
-        // เริ่ม animation
         let total_duration = 0.8_f64;
         let stagger_delay = (total_duration / total as f64).min(0.05);
-
         self.apply_anim = ApplyAnimation {
             is_playing: true,
             timer: 0.0,
@@ -936,13 +953,71 @@ impl Engine {
         self.history.push(element);
     }
 
+    pub fn push_new(&mut self, data: ElementData) -> u64 {
+        let id = self.get_next_id();
+        let layer = self.current_layer;
+        self.add_element(DrawingElement { id, is_selected: false, layer, color: None, data });
+        id
+    }
+
+    pub fn push_imported(&mut self, data: ElementData, layer: usize, color: Option<Rgb>) {
+        let id = self.get_next_id();
+        self.add_element(DrawingElement { id, is_selected: false, layer, color, data });
+    }
+
+    fn layer_visible(&self, i: usize) -> bool {
+        self.layers[self.history[i].layer].visible
+    }
+
+    fn pickable(&self, i: usize) -> bool {
+        let l = &self.layers[self.history[i].layer];
+        l.visible && !l.locked
+    }
+
+    fn pen_color(&self, el: &DrawingElement) -> (f64, f64, f64) {
+        let c = el.color.unwrap_or(self.layers[el.layer].color);
+        (c.0 as f64 / 255.0, c.1 as f64 / 255.0, c.2 as f64 / 255.0)
+    }
+
+    pub fn set_current_layer(&mut self, i: usize) {
+        if i < self.layers.len() {
+            self.current_layer = i;
+        }
+    }
+
+    fn drop_selection_on_layer(&mut self, layer: usize) {
+        for e in self.history.iter_mut().filter(|e| e.layer == layer) {
+            e.is_selected = false;
+        }
+        self.hovered_id = None;
+    }
+
+    pub fn set_layer_visible(&mut self, i: usize, v: bool) {
+        let Some(l) = self.layers.get_mut(i) else { return };
+        l.visible = v;
+        self.dirty = true;
+        if !v {
+            self.drop_selection_on_layer(i);
+        }
+    }
+
+    pub fn set_layer_locked(&mut self, i: usize, v: bool) {
+        let Some(l) = self.layers.get_mut(i) else { return };
+        l.locked = v;
+        self.dirty = true;
+        if v {
+            self.drop_selection_on_layer(i);
+        }
+    }
+
     pub fn get_visible_elements(&self, viewport_bounds: BoundingBox) -> Vec<&DrawingElement> {
         let mut hits = Vec::new();
         self.spatial_index.query(&viewport_bounds, &mut hits);
         let mut ids: Vec<u64> = hits.into_iter().copied().collect();
-        ids.sort_unstable(); // ลำดับการวาดคงที่ ไม่กะพริบ
+        ids.sort_unstable();
         ids.into_iter()
             .filter_map(|id| self.index_of(id).map(|i| &self.history[i]))
+            .filter(|e| self.layers[e.layer].visible)
             .collect()
     }
 
@@ -965,7 +1040,6 @@ impl Engine {
         let mut array_changed = false;
         let lerp_factor = (dt * 15.0).min(1.0);
 
-        // apply animation
         if self.apply_anim.is_playing {
             self.apply_anim.timer += dt;
             if self.apply_anim.timer >= self.apply_anim.total_duration {
@@ -1046,7 +1120,6 @@ impl Engine {
         )
     }
 
-    /// หาจุดสำคัญของวัตถุที่ใกล้เมาส์ที่สุด (ระยะ 12px บนจอ)
     pub fn find_object_snap(
         &self,
         wx: f64,
@@ -1066,7 +1139,9 @@ impl Engine {
         let elems: Vec<&ElementData> = hits
             .into_iter()
             .copied()
-            .filter_map(|id| self.index_of(id).map(|i| &self.history[i].data))
+            .filter_map(|id| self.index_of(id))
+            .filter(|&i| self.layer_visible(i))
+            .map(|i| &self.history[i].data)
             .collect();
 
         let mut best: Option<(f64, Point, SnapKind)> = None;
@@ -1142,7 +1217,6 @@ impl Engine {
             }
         }
 
-        // จุดตัด: ตรวจเฉพาะคู่ของวัตถุที่อยู่ใกล้เมาส์ (จำกัด 32 ชิ้นกัน O(n²) บาน)
         if settings.intersection {
             let n = elems.len().min(32);
             let lists: Vec<Vec<Prim>> = elems[..n].iter().map(|d| prims(d)).collect();
@@ -1200,20 +1274,13 @@ impl Engine {
     }
 
     pub fn get_render_commands(&self, screen_w: f64, screen_h: f64) -> Vec<RenderCommand> {
-        // ใช้ screen_to_world หา 2 มุมของจอ
         let p1 = self.camera.screen_to_world(0.0, 0.0);
         let p2 = self.camera.screen_to_world(screen_w, screen_h);
-
-        // BoundingBox::from_points จะหา min/max ให้เองจาก 2 จุดนี้
         let viewport_bounds = BoundingBox::from_points(p1.0, p1.1, p2.0, p2.1);
-
-        // 2. Query หาเฉพาะสิ่งที่ต้องวาด
         let visible_elements = self.get_visible_elements(viewport_bounds);
         let mut commands = Vec::with_capacity(visible_elements.len());
-
         for el in visible_elements {
-            let mut draw_scale = 1.0f64; // scale ปกติ
-
+            let mut draw_scale = 1.0f64;
             if self.apply_anim.is_playing {
                 if let Some(idx) = self
                     .apply_anim
@@ -1226,16 +1293,17 @@ impl Engine {
 
                     if progress <= 0.0 {
                         continue;
-                    } // ยังไม่ถึงเวลา
+                    }
 
-                    // bounce scale: 0 -> 1.2 -> 1.0
                     draw_scale = if progress < 0.6 {
-                        progress / 0.6 * 1.2 // ขยายขึ้น
+                        progress / 0.6 * 1.2
                     } else {
-                        1.2 - (progress - 0.6) / 0.4 * 0.2 // หดกลับ
+                        1.2 - (progress - 0.6) / 0.4 * 0.2
                     };
                 }
             }
+
+            let col = self.pen_color(el);
 
             match &el.data {
                 // --- Line ---
@@ -1254,6 +1322,7 @@ impl Engine {
                         x2: e.0,
                         y2: e.1,
                         is_selected: el.is_selected,
+                        color: col,
                     });
                 }
                 // --- Circle ---
@@ -1265,6 +1334,7 @@ impl Engine {
                         cy: c.1,
                         radius: r,
                         is_selected: el.is_selected,
+                        color: col,
                     });
                 }
                 ElementData::Dimension { start, end, offset } => {
@@ -1301,6 +1371,7 @@ impl Engine {
                         start_angle: *start_angle,
                         end_angle: *end_angle,
                         is_selected: el.is_selected,
+                        color: col,
                     });
                 }
                 ElementData::Polyline { points, closed } => {
@@ -1319,6 +1390,7 @@ impl Engine {
                         points: pts,
                         closed: *closed,
                         is_selected: el.is_selected,
+                        color: col,
                     });
                 }
             }
@@ -1397,7 +1469,7 @@ fn intersect_elements(a: &ElementData, b: &ElementData) -> Vec<Point> {
         (Circle { center: c1, radius: r1 }, Circle { center: c2, radius: r2 }) => {
             circle_circle(*c1, *r1, *c2, *r2)
         }
-        _ => vec![], // Dimension ไม่นับ
+        _ => vec![],
     }
 }
 
@@ -1409,7 +1481,6 @@ pub fn arc_point(c: Point, r: f64, a: f64) -> Point {
     Point { x: c.x + r * a.cos(), y: c.y + r * a.sin() }
 }
 
-/// คืน (center, radius, start_angle, end_angle) โดย end > start และเส้นโค้งผ่านทั้งสามจุดตามลำดับ
 pub fn arc_from_three_points(p1: Point, p2: Point, p3: Point) -> Option<(Point, f64, f64, f64)> {
     let d = 2.0 * (p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y));
     if d.abs() < 1e-9 {
@@ -1452,7 +1523,6 @@ fn arc_bounds(c: Point, r: f64, s: f64, e: f64) -> BoundingBox {
     b
 }
 
-/// ชิ้นส่วนพื้นฐานสำหรับคำนวณจุดตัด
 enum Prim {
     Seg(Point, Point),
     Circle { c: Point, r: f64 },
@@ -1753,9 +1823,6 @@ impl ElementData {
 }
 
 const TRIM_EPS: f64 = 1e-9;
-
-/// ตัดส่วนของ `data` ที่ click ชี้อยู่ ระหว่างเส้นตัด (cutters)
-/// คืน (ชิ้นที่เหลือ, ส่วนที่ถูกตัดทิ้ง) — ส่วนที่ตัดทิ้งใช้วาดพรีวิว
 fn trim_data(
     data: &ElementData,
     click: Point,
@@ -1875,8 +1942,6 @@ fn trim_data(
     }
 }
 
-/// ยืดปลายที่อยู่ใกล้จุดคลิกที่สุดของ `data` ไปจนชนเส้นขอบ (cutters)
-/// คืน (วัตถุใหม่, ส่วนที่ยืดเพิ่ม) — ส่วนที่ยืดเพิ่มใช้วาดพรีวิว
 fn extend_data(
     data: &ElementData,
     click: Point,
@@ -1957,6 +2022,42 @@ fn extend_data(
     }
 }
 
+fn merge_opt(a: Option<BoundingBox>, b: Option<BoundingBox>) -> Option<BoundingBox> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.merge(&b)),
+        (a, b) => a.or(b),
+    }
+}
+
+fn extend_area(data: &ElementData, reach: f64) -> Option<BoundingBox> {
+    let ray = |o: Point, from: Point| -> Option<BoundingBox> {
+        let (dx, dy) = (o.x - from.x, o.y - from.y);
+        let l = dx.hypot(dy);
+        if l < 1e-12 {
+            return None;
+        }
+        Some(BoundingBox::from_points(
+            o.x,
+            o.y,
+            o.x + dx / l * reach,
+            o.y + dy / l * reach,
+        ))
+    };
+    match data {
+        ElementData::Line { start, end } => merge_opt(ray(*end, *start), ray(*start, *end)),
+        ElementData::Polyline { points, closed: false } if points.len() >= 2 => {
+            let n = points.len();
+            merge_opt(ray(points[n - 1], points[n - 2]), ray(points[0], points[1]))
+        }
+        ElementData::Arc { center, radius, .. } => Some(BoundingBox {
+            min_x: center.x - radius,
+            min_y: center.y - radius,
+            max_x: center.x + radius,
+            max_y: center.y + radius,
+        }),
+        _ => None,
+    }
+}
 
 // ---------------- Polyline ----------------
 

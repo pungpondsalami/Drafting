@@ -159,6 +159,11 @@ mod imp {
                 button.tool-active:hover {
                     background-color: alpha(@accent_bg_color, 0.7);
                 }
+
+                .drafting-floating button.layer-locked,
+                .drafting-floating button.layer-locked:checked {
+                    color: #f5a623;
+                }
             "#);
             gtk::style_context_add_provider_for_display(
                 &gtk::gdk::Display::default().unwrap(),
