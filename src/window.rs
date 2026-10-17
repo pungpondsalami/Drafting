@@ -1680,7 +1680,7 @@ impl DraftingWindow {
                         && since.elapsed() >= std::time::Duration::from_millis(80)
                 };
                 if go {
-                    let (mx, my) = (w * SCENE_MARGIN, h * SCENE_MARGIN);
+                    let (mx, my) = scene_margin(w, h);
                     let s2w = |x: f64, y: f64| ((x - toff.0) / ts, -(y - toff.1) / ts);
                     let commands = dm.render_commands_at_target(-mx, -my, w + mx, h + my);
                     let (sx, sy) = cr.target().device_scale();
@@ -1716,7 +1716,7 @@ impl DraftingWindow {
 
         paint_grid(cr, cam, w, h);
 
-        let (mx, my) = (w * SCENE_MARGIN, h * SCENE_MARGIN);
+        let (mx, my) = scene_margin(w, h);
         let (ew, eh) = (w + 2.0 * mx, h + 2.0 * my);
         let cur_key: SceneKey = (
             w as i32,
@@ -2790,6 +2790,10 @@ impl DraftingWindow {
     }
 }
 
+fn scene_margin(w: f64, h: f64) -> (f64, f64) {
+    ((w * SCENE_MARGIN).round(), (h * SCENE_MARGIN).round())
+}
+
 const SCENE_MARGIN: f64 = 0.25;
 type SceneKey = (i32, i32, u64, u64, u64);
 
@@ -2842,7 +2846,7 @@ fn cam_moving(c: &crate::engine::Camera) -> bool {
 
 fn render_scene_job(job: SceneJob) -> Option<SceneDone> {
     use gtk::cairo::{Context, Format, ImageSurface};
-    let (mx, my) = (job.w * SCENE_MARGIN, job.h * SCENE_MARGIN);
+    let (mx, my) = scene_margin(job.w, job.h);
     let (ew, eh) = (job.w + 2.0 * mx, job.h + 2.0 * my);
     let (wpx, hpx) = ((ew * job.sx).ceil() as i32, (eh * job.sy).ceil() as i32);
     let mut surface = ImageSurface::create(Format::ARgb32, wpx, hpx).ok()?;
