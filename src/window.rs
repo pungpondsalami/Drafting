@@ -2790,7 +2790,7 @@ impl DraftingWindow {
     }
 }
 
-const SCENE_MARGIN: f64 = 0.5;
+const SCENE_MARGIN: f64 = 0.25;
 type SceneKey = (i32, i32, u64, u64, u64);
 
 #[derive(Debug)]
