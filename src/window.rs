@@ -18,12 +18,11 @@
  */
 
 use crate::engine::{
-    DEFAULT_DIMENSION_OFFSET, DrawingElement, ElementData, Point, RenderCommand, SnapKind,
+    DEFAULT_DIMENSION_OFFSET, ElementData, Point, RenderCommand, SnapKind,
     SnapSettings, ToolMode as DrawingMode, arc_from_three_points, linear_dimension_geometry,
 };
 
 use adw::subclass::prelude::*;
-use dxf;
 use gtk::gdk;
 use gtk::prelude::*;
 use adw::prelude::*;
@@ -2392,7 +2391,6 @@ impl DraftingWindow {
         }
     }
 
-    /// มี path แล้วเขียนเลย ไม่มีก็เปิด Save As
     pub fn save_page(&self, page: &adw::TabPage, on_done: impl Fn(bool) + 'static) {
         let path = self
             .imp()
@@ -2401,10 +2399,7 @@ impl DraftingWindow {
             .get(page)
             .and_then(|d| d.borrow().file_path.clone());
         match path {
-            Some(p) => {
-                let ok = self.write_page_to(page, p);
-                on_done(ok);
-            }
+            Some(p) => self.write_page_guarded(page, p, std::rc::Rc::new(on_done)),
             None => self.save_page_as(page, on_done),
         }
     }
@@ -2437,18 +2432,75 @@ impl DraftingWindow {
                 self,
                 #[weak]
                 page,
-                move |res| {
-                    let ok = match res {
-                        Ok(file) => file
-                            .path()
-                            .map(|p| obj.write_page_to(&page, p))
-                            .unwrap_or(false),
-                        Err(_) => false, // ผู้ใช้กดยกเลิก
-                    };
-                    on_done(ok);
+                move |res| match res {
+                    Ok(file) => match file.path() {
+                        Some(p) => obj.write_page_guarded(&page, p, std::rc::Rc::new(on_done)),
+                        None => on_done(false),
+                    },
+                    Err(_) => on_done(false),
                 }
             ),
         );
+    }
+
+    fn write_page_guarded(
+        &self,
+        page: &adw::TabPage,
+        path: PathBuf,
+        on_done: std::rc::Rc<dyn Fn(bool)>,
+    ) {
+        let (skipped, same) = {
+            let pages = self.imp().pages.borrow();
+            match pages.get(page) {
+                Some(d) => {
+                    let d = d.borrow();
+                    (d.skipped, d.file_path.as_deref() == Some(path.as_path()))
+                }
+                None => (0, false),
+            }
+        };
+
+        if skipped == 0 || !same {
+            on_done(self.write_page_to(page, path));
+            return;
+        }
+
+        let dialog = adw::AlertDialog::new(
+            Some("Overwrite and lose objects?"),
+            Some(&format!(
+                "{} objects in this file aren't supported yet and won't be saved. \
+                 Saving over it will delete them from the file.\n\n\
+                 Use Save As (Ctrl+Shift+S) to keep the original.",
+                skipped
+            )),
+        );
+        dialog.add_responses(&[
+            ("cancel", "_Cancel"),
+            ("saveas", "Save _As…"),
+            ("overwrite", "_Overwrite"),
+        ]);
+        dialog.set_response_appearance("overwrite", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("saveas"));
+        dialog.set_close_response("cancel");
+
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                #[weak]
+                page,
+                move |_, response| match response {
+                    "overwrite" => on_done(obj.write_page_to(&page, path.clone())),
+                    "saveas" => {
+                        let cb = on_done.clone();
+                        obj.save_page_as(&page, move |ok| cb(ok));
+                    }
+                    _ => on_done(false),
+                }
+            ),
+        );
+        dialog.present(Some(self));
     }
 
     fn write_page_to(&self, page: &adw::TabPage, mut path: PathBuf) -> bool {
@@ -2475,6 +2527,11 @@ impl DraftingWindow {
         if let Some(name) = path.file_name() {
             page.set_title(&name.to_string_lossy());
         }
+
+        if d.file_path.as_deref() != Some(path.as_path()) {
+            d.skipped = 0; // เซฟเป็นไฟล์ใหม่แล้ว ไม่ต้องเตือนซ้ำ
+        }
+
         d.file_path = Some(path);
         true
     }
@@ -2552,6 +2609,7 @@ impl DraftingWindow {
                 }
                 d.file_path = Some(path.clone());
                 d.dirty = false;
+                d.skipped = skipped;
             }
             obj.refresh_layers();
 
@@ -2964,94 +3022,84 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
     Imported { layers, items, skipped }
 }
 
-fn aci_of(c: Rgb) -> u8 {
-    acadrust::Color::Rgb { r: c.0, g: c.1, b: c.2 }
-        .approximate_index()
-        .clamp(1, 255) as u8
+fn to_ac_color(c: Rgb) -> acadrust::Color {
+    if c == (255, 255, 255) {
+        acadrust::Color::Index(7)
+    } else {
+        acadrust::Color::Rgb { r: c.0, g: c.1, b: c.2 }
+    }
 }
 
 fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> {
-    let mut drawing = dxf::Drawing::new();
+    use acadrust::entities::{Arc, Circle, Line, LwPolyline, LwVertex};
+    use acadrust::tables::Layer as AcLayer;
+    use acadrust::{CadDocument, DxfWriter, EntityType, Vector3};
+
+    let mut doc = CadDocument::new();
+
     for l in &data.layers {
-        let color = dxf::Color::from_index(aci_of(l.color));
-        if let Some(ex) = drawing.layers_mut().find(|x| x.name.eq_ignore_ascii_case(&l.name)) {
-            ex.color = color;
-            ex.is_layer_on = l.visible;
+        if let Some(ex) = doc.layers.get_mut(&l.name) {
+            ex.color = to_ac_color(l.color);
+            ex.flags.off = !l.visible;
+            ex.flags.locked = l.locked;
         } else {
-            drawing.add_layer(dxf::tables::Layer {
-                name: l.name.clone(),
-                color,
-                is_layer_on: l.visible,
-                ..Default::default()
-            });
+            let mut nl = AcLayer::new(l.name.clone());
+            nl.color = to_ac_color(l.color);
+            nl.flags.off = !l.visible;
+            nl.flags.locked = l.locked;
+            doc.layers.add(nl)?;
         }
     }
 
     for el in data.get_all_elements() {
         let layer_name = data.layers[el.layer].name.clone();
-        let color = el.color.map(|c| dxf::Color::from_index(aci_of(c)));
-        // ใส่ชื่อ layer + สี (ถ้ามี) ให้ทุก entity ที่เขียนออก
-        let put = |drawing: &mut dxf::Drawing, et: dxf::entities::EntityType| {
-            let mut e = dxf::entities::Entity::new(et);
-            e.common.layer = layer_name.clone();
-            if let Some(c) = &color {
-                e.common.color = c.clone();
+        let color = el.color.map(to_ac_color);
+        let mut push = |mut e: EntityType| -> Result<(), String> {
+            {
+                let c = e.common_mut();
+                c.layer = layer_name.clone();
+                if let Some(col) = &color {
+                    c.color = col.clone();
+                }
             }
-            drawing.add_entity(e);
+            doc.add_entity(e).map(|_| ()).map_err(|e| e.to_string())
         };
-        let put_line = |drawing: &mut dxf::Drawing, a: Point, b: Point| {
-            put(
-                drawing,
-                dxf::entities::EntityType::Line(dxf::entities::Line {
-                    p1: dxf::Point::new(a.x, a.y, 0.0),
-                    p2: dxf::Point::new(b.x, b.y, 0.0),
-                    ..Default::default()
-                }),
-            );
+        let line = |a: Point, b: Point| {
+            let mut l = Line::new();
+            l.start = Vector3::new(a.x, a.y, 0.0);
+            l.end = Vector3::new(b.x, b.y, 0.0);
+            EntityType::Line(l)
         };
 
         match &el.data {
-            ElementData::Line { start, end } => put_line(&mut drawing, *start, *end),
-            ElementData::Circle { center, radius } => put(
-                &mut drawing,
-                dxf::entities::EntityType::Circle(dxf::entities::Circle {
-                    center: dxf::Point::new(center.x, center.y, 0.0),
-                    radius: *radius,
-                    ..Default::default()
-                }),
-            ),
+            ElementData::Line { start, end } => push(line(*start, *end))?,
+            ElementData::Circle { center, radius } => push(EntityType::Circle(
+                Circle::from_center_radius(Vector3::new(center.x, center.y, 0.0), *radius),
+            ))?,
             ElementData::Dimension { start, end, offset } => {
                 if let Some(g) = linear_dimension_geometry(*start, *end, *offset) {
-                    put_line(&mut drawing, g.start, g.dim_from);
-                    put_line(&mut drawing, g.end, g.dim_to);
-                    put_line(&mut drawing, g.dim_from, g.dim_to);
+                    push(line(g.start, g.dim_from))?;
+                    push(line(g.end, g.dim_to))?;
+                    push(line(g.dim_from, g.dim_to))?;
                 }
             }
-            ElementData::Arc { center, radius, start_angle, end_angle } => put(
-                &mut drawing,
-                dxf::entities::EntityType::Arc(dxf::entities::Arc {
-                    center: dxf::Point::new(center.x, center.y, 0.0),
-                    radius: *radius,
-                    start_angle: start_angle.to_degrees().rem_euclid(360.0),
-                    end_angle: end_angle.to_degrees().rem_euclid(360.0),
-                    ..Default::default()
-                }),
-            ),
-            ElementData::Polyline { points, closed } => put(
-                &mut drawing,
-                dxf::entities::EntityType::LwPolyline(dxf::entities::LwPolyline {
-                    vertices: points
-                        .iter()
-                        .map(|p| dxf::LwPolylineVertex { x: p.x, y: p.y, ..Default::default() })
-                        .collect(),
-                    flags: if *closed { 1 } else { 0 },
-                    ..Default::default()
-                }),
-            ),
+            // acadrust เก็บมุม Arc เป็นเรเดียนเหมือนเรา (DxfWriter แปลงเป็นองศาเอง)
+            ElementData::Arc { center, radius, start_angle, end_angle } => {
+                push(EntityType::Arc(Arc::from_center_radius_angles(
+                    Vector3::new(center.x, center.y, 0.0),
+                    *radius,
+                    *start_angle,
+                    *end_angle,
+                )))?
+            }
+            ElementData::Polyline { points, closed } => {
+                let mut p = LwPolyline::new();
+                p.vertices = points.iter().map(|q| LwVertex::from_coords(q.x, q.y)).collect();
+                p.is_closed = *closed;
+                push(EntityType::LwPolyline(p))?
+            }
         }
     }
 
-    let mut buf = std::io::Cursor::new(Vec::new());
-    drawing.save(&mut buf).map_err(|e| e.to_string())?;
-    Ok(buf.into_inner())
+    DxfWriter::new(&doc).write_to_vec().map_err(|e| e.to_string())
 }

@@ -153,7 +153,7 @@ pub struct DrawingElement {
 }
 
 #[derive(Debug, Clone)]
-struct Snapshot {
+pub struct Snapshot {
     history: Vec<DrawingElement>,
     layers: Vec<Layer>,
     current_layer: usize,
@@ -475,6 +475,7 @@ pub struct Engine {
     pub dirty: bool,
     pub layers: Vec<Layer>,
     pub current_layer: usize,
+    pub skipped: usize,
 }
 
 impl Engine {
@@ -496,6 +497,7 @@ impl Engine {
             dirty: false,
             layers: vec![Layer::new("0", (255, 255, 255))],
             current_layer: 0,
+            skipped: 0,
         }
     }
 
