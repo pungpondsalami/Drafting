@@ -153,6 +153,13 @@ pub struct DrawingElement {
 }
 
 #[derive(Debug, Clone)]
+struct Snapshot {
+    history: Vec<DrawingElement>,
+    layers: Vec<Layer>,
+    current_layer: usize,
+}
+
+#[derive(Debug, Clone)]
 pub enum ElementData {
     Line { start: Point, end: Point },
     Circle { center: Point, radius: f64 },
@@ -462,8 +469,8 @@ pub struct Engine {
     pub show_array_ui: bool,
     pub apply_anim: ApplyAnimation,
     pub hovered_id: Option<u64>,
-    pub undo_stack: Vec<Vec<DrawingElement>>,
-    pub redo_stack: Vec<Vec<DrawingElement>>,
+    pub undo_stack: Vec<Snapshot>,
+    pub redo_stack: Vec<Snapshot>,
     pub file_path: Option<PathBuf>,
     pub dirty: bool,
     pub layers: Vec<Layer>,
@@ -722,9 +729,26 @@ impl Engine {
         self.spatial_index = idx;
     }
 
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            history: self.history.clone(),
+            layers: self.layers.clone(),
+            current_layer: self.current_layer,
+        }
+    }
+
+    fn restore(&mut self, s: Snapshot) {
+        self.history = s.history;
+        self.layers = s.layers;
+        self.current_layer = s.current_layer;
+        self.hovered_id = None;
+        self.rebuild_index();
+    }
+
     pub fn checkpoint(&mut self) {
         self.dirty = true;
-        self.undo_stack.push(self.history.clone());
+        let snap = self.snapshot();
+        self.undo_stack.push(snap);
         if self.undo_stack.len() > Self::MAX_UNDO {
             self.undo_stack.remove(0);
         }
@@ -734,20 +758,18 @@ impl Engine {
     pub fn undo_last_action(&mut self) {
         if let Some(prev) = self.undo_stack.pop() {
             self.dirty = true;
-            let current = std::mem::replace(&mut self.history, prev);
-            self.redo_stack.push(current);
-            self.hovered_id = None;
-            self.rebuild_index();
+            let cur = self.snapshot();
+            self.redo_stack.push(cur);
+            self.restore(prev);
         }
     }
 
     pub fn redo_last_action(&mut self) {
         if let Some(next) = self.redo_stack.pop() {
             self.dirty = true;
-            let current = std::mem::replace(&mut self.history, next);
-            self.undo_stack.push(current);
-            self.hovered_id = None;
-            self.rebuild_index();
+            let cur = self.snapshot();
+            self.undo_stack.push(cur);
+            self.restore(next);
         }
     }
 
@@ -1018,14 +1040,41 @@ impl Engine {
         let mut n = self.layers.len();
         let name = loop {
             let c = format!("Layer{}", n);
-            if self.find_layer(&c).is_none() {
-                break c;
-            }
+            if self.find_layer(&c).is_none() { break c; }
             n += 1;
         };
+        self.checkpoint();                       // <- เพิ่ม
         self.layers.push(Layer::new(&name, (255, 255, 255)));
-        self.dirty = true;
         self.layers.len() - 1
+    }
+
+    pub fn delete_layer(&mut self, i: usize) -> Result<usize, &'static str> {
+        if i == 0 {
+            return Err("Layer 0 can't be deleted");
+        }
+        if i >= self.layers.len() {
+            return Err("Layer no longer exists");
+        }
+        self.checkpoint();
+        let mut moved = 0;
+        for e in self.history.iter_mut() {
+            if e.layer == i {
+                e.layer = 0;
+                moved += 1;
+            } else if e.layer > i {
+                e.layer -= 1;
+            }
+        }
+        self.layers.remove(i);
+        self.current_layer = if self.current_layer == i {
+            0
+        } else if self.current_layer > i {
+            self.current_layer - 1
+        } else {
+            self.current_layer
+        };
+        self.hovered_id = None;
+        Ok(moved)
     }
 
     pub fn rename_layer(&mut self, i: usize, new: &str) -> Result<(), &'static str> {
@@ -1047,16 +1096,18 @@ impl Engine {
             Some(_) => return Err("A layer with this name already exists"),
             None => {}
         }
+        self.checkpoint();
         self.layers[i].name = new.to_string();
         self.dirty = true;
         Ok(())
     }
 
     pub fn set_layer_color(&mut self, i: usize, c: Rgb) {
-        if let Some(l) = self.layers.get_mut(i) {
-            l.color = c;
-            self.dirty = true;
+        if self.layers.get(i).map_or(true, |l| l.color == c) {
+            return;
         }
+        self.checkpoint();
+        self.layers[i].color = c;
     }
 
     pub fn move_selected_to_layer(&mut self) -> usize {

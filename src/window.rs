@@ -248,7 +248,7 @@ mod imp {
                         return glib::Propagation::Stop;
                     }
 
-                    // Undo: Ctrl + Z
+                    // Undo: Ctrl+Z
                     if is_ctrl && (key == gdk::Key::z || key == gdk::Key::Z) {
                         obj.undo_action();
                         return glib::Propagation::Stop;
@@ -2222,8 +2222,20 @@ impl DraftingWindow {
             if i != 0 {
                 let entry = gtk::Entry::builder().text(&l.name).width_chars(18).build();
                 let pop = gtk::Popover::new();
-                pop.set_child(Some(&entry));
                 pop.set_parent(&hb);
+
+                let pbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
+                pbox.set_margin_top(6);
+                pbox.set_margin_bottom(6);
+                pbox.set_margin_start(6);
+                pbox.set_margin_end(6);
+                pbox.append(&entry);
+
+                let del = gtk::Button::with_label("Delete layer");
+                del.add_css_class("destructive-action");
+                del.set_tooltip_text(Some("Objects on this layer move to layer 0"));
+                pbox.append(&del);
+                pop.set_child(Some(&pbox));
 
                 entry.connect_activate(glib::clone!(
                     #[weak(rename_to = obj)]
@@ -2233,12 +2245,32 @@ impl DraftingWindow {
                     move |e| {
                         let text = e.text().to_string();
                         pop.popdown();
-
                         let _ = obj.with_engine(|d| d.rename_layer(i, &text));
                         glib::idle_add_local_once(glib::clone!(
                             #[weak]
                             obj,
                             move || obj.refresh_layers()
+                        ));
+                    }
+                ));
+
+                del.connect_clicked(glib::clone!(
+                    #[weak(rename_to = obj)]
+                    self,
+                    #[weak]
+                    pop,
+                    move |_| {
+                        pop.popdown();
+                        let _ = obj.with_engine(|d| d.delete_layer(i));
+                        glib::idle_add_local_once(glib::clone!(
+                            #[weak]
+                            obj,
+                            move || {
+                                obj.refresh_layers();
+                                if let Some(p) = obj.imp().tab_view.selected_page() {
+                                    p.child().queue_draw();
+                                }
+                            }
                         ));
                     }
                 ));
@@ -2256,7 +2288,6 @@ impl DraftingWindow {
                     }
                 ));
                 hb.add_controller(right_click);
-
                 hb.connect_destroy(glib::clone!(
                     #[weak]
                     pop,
@@ -2325,22 +2356,27 @@ impl DraftingWindow {
 
     pub fn undo_action(&self) {
         if let Some(page) = self.imp().tab_view.selected_page() {
-            let pages = self.imp().pages.borrow();
-            if let Some(d_ref) = pages.get(&page) {
-                let mut d = d_ref.borrow_mut();
-                d.undo_last_action();
-                page.child().queue_draw();
+            {
+                let pages = self.imp().pages.borrow();
+                if let Some(d_ref) = pages.get(&page) {
+                    d_ref.borrow_mut().undo_last_action();
+                }
             }
+            page.child().queue_draw();
+            self.refresh_layers();
         }
     }
 
     pub fn redo_action(&self) {
         if let Some(page) = self.imp().tab_view.selected_page() {
-            let pages = self.imp().pages.borrow();
-            if let Some(d_ref) = pages.get(&page) {
-                d_ref.borrow_mut().redo_last_action();
-                page.child().queue_draw();
+            {
+                let pages = self.imp().pages.borrow();
+                if let Some(d_ref) = pages.get(&page) {
+                    d_ref.borrow_mut().redo_last_action();
+                }
             }
+            page.child().queue_draw();
+            self.refresh_layers();
         }
     }
 
