@@ -37,10 +37,9 @@ DXF files are read with [acadrust](https://crates.io/crates/acadrust) (newer DXF
 | Spline | Yes (flattened to a polyline) | Saved as a polyline |
 | Ellipse | Yes (flattened to a polyline) | Saved as a polyline |
 | Linear dimension | No | Saved as three plain lines |
-| Layers | Name, color, on/off and lock state | Name, color and on/off state |
+| Layers | Read/Write, true color, on/off and lock state | Read/Write, true color and on/off state |
 | Entity color | ACI and true color | True color is saved as the nearest ACI color |
 
-The layer lock state is not saved to the file (a limitation of the `dxf` crate), so layers come back unlocked when you reopen it.
 Other entity types (hatch, solid, text, block inserts, tables, ...) are skipped when opening a file.
 
 ## Installation
