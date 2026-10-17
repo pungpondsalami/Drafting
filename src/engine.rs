@@ -167,6 +167,8 @@ pub enum ElementData {
     /// มุมเป็นเรเดียน หมุนทวนเข็ม (CCW) จาก start ไป end และ end > start เสมอ
     Arc { center: Point, radius: f64, start_angle: f64, end_angle: f64 },
     Polyline { points: Vec<Point>, closed: bool },
+    /// พื้นที่ทึบ/hatch: หลาย loop (even-odd) filled=false → วาดแต่เส้นขอบ
+    Fill { loops: Vec<Vec<Point>>, filled: bool },
 }
 
 impl ElementData {
@@ -188,6 +190,12 @@ impl ElementData {
                     p.y += dy;
                 }
             }
+            ElementData::Fill { loops, .. } => {
+                for p in loops.iter_mut().flatten() {
+                    p.x += dx;
+                    p.y += dy;
+                }
+            }
         }
     }
 
@@ -198,6 +206,12 @@ impl ElementData {
             ElementData::Polyline { points, .. } => {
                 points.first().copied().unwrap_or(Point { x: 0.0, y: 0.0 })
             }
+            ElementData::Fill { loops, .. } => loops
+                .iter()
+                .flatten()
+                .next()
+                .copied()
+                .unwrap_or(Point { x: 0.0, y: 0.0 }),
         }
     }
 }
@@ -238,7 +252,7 @@ pub struct Camera {
     pub target_offset: (f64, f64),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RenderCommand {
     Line {
         x1: f64,
@@ -279,6 +293,12 @@ pub enum RenderCommand {
     Polyline {
         points: Vec<(f64, f64)>,
         closed: bool,
+        is_selected: bool,
+        color: (f64, f64, f64),
+    },
+    Fill {
+        loops: Vec<Vec<(f64, f64)>>,
+        filled: bool,
         is_selected: bool,
         color: (f64, f64, f64),
     },
@@ -344,6 +364,24 @@ impl DrawingElement {
                     b.min_y = b.min_y.min(p.y);
                     b.max_x = b.max_x.max(p.x);
                     b.max_y = b.max_y.max(p.y);
+                }
+                b
+            }
+            ElementData::Fill { loops, .. } => {
+                let mut b = BoundingBox {
+                    min_x: f64::MAX,
+                    min_y: f64::MAX,
+                    max_x: f64::MIN,
+                    max_y: f64::MIN,
+                };
+                for p in loops.iter().flatten() {
+                    b.min_x = b.min_x.min(p.x);
+                    b.min_y = b.min_y.min(p.y);
+                    b.max_x = b.max_x.max(p.x);
+                    b.max_y = b.max_y.max(p.y);
+                }
+                if b.min_x > b.max_x {
+                    b = BoundingBox { min_x: 0.0, min_y: 0.0, max_x: 0.0, max_y: 0.0 };
                 }
                 b
             }
@@ -519,7 +557,11 @@ impl Engine {
             if !self.pickable(i) {
                 continue;
             }
-            let d = self.history[i].data.distance_to(p);
+            let mut d = self.history[i].data.distance_to(p);
+            // คลิกข้างในพื้นที่ทึบเลือกได้ แต่ให้เส้นที่อยู่ใกล้ ๆ ชนะ
+            if d > tol * 0.9 && self.history[i].data.fill_contains(p) {
+                d = tol * 0.9;
+            }
             if d > tol {
                 continue;
             }
@@ -554,7 +596,10 @@ impl Engine {
     pub fn offset_pick(&mut self, wx: f64, wy: f64) -> Option<u64> {
         let id = self.pick_at(wx, wy)?;
         let i = self.index_of(id)?;
-        if matches!(self.history[i].data, ElementData::Dimension { .. }) {
+        if matches!(
+            self.history[i].data,
+            ElementData::Dimension { .. } | ElementData::Fill { .. }
+        ) {
             return None;
         }
         self.deselect_all();
@@ -908,6 +953,25 @@ impl Engine {
                             previews.push(RenderCommand::Polyline {
                                 points: pts,
                                 closed: *closed,
+                                is_selected: true,
+                                color: (1.0, 1.0, 1.0),
+                            });
+                        }
+                        ElementData::Fill { loops, filled } => {
+                            let loops = loops
+                                .iter()
+                                .map(|l| {
+                                    l.iter()
+                                        .map(|p| {
+                                            self.camera
+                                                .world_to_screen(p.x + offset_x, p.y + offset_y)
+                                        })
+                                        .collect()
+                                })
+                                .collect();
+                            previews.push(RenderCommand::Fill {
+                                loops,
+                                filled: *filled,
                                 is_selected: true,
                                 color: (1.0, 1.0, 1.0),
                             });
@@ -1323,6 +1387,11 @@ impl Engine {
                         }
                     }
                 }
+                ElementData::Fill { loops, .. } => {
+                    for p in loops.iter().flatten().take(256) {
+                        consider(*p, SnapKind::Endpoint);
+                    }
+                }
                 ElementData::Polyline { points, closed } => {
                     for p in points {
                         consider(*p, SnapKind::Endpoint);
@@ -1397,8 +1466,12 @@ impl Engine {
     }
 
     pub fn get_render_commands(&self, screen_w: f64, screen_h: f64) -> Vec<RenderCommand> {
-        let p1 = self.camera.screen_to_world(0.0, 0.0);
-        let p2 = self.camera.screen_to_world(screen_w, screen_h);
+        self.get_render_commands_in(0.0, 0.0, screen_w, screen_h)
+    }
+
+    pub fn get_render_commands_in(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<RenderCommand> {
+        let p1 = self.camera.screen_to_world(x0, y0);
+        let p2 = self.camera.screen_to_world(x1, y1);
         let viewport_bounds = BoundingBox::from_points(p1.0, p1.1, p2.0, p2.1);
         let visible_elements = self.get_visible_elements(viewport_bounds);
         let mut commands = Vec::with_capacity(visible_elements.len());
@@ -1516,9 +1589,46 @@ impl Engine {
                         color: col,
                     });
                 }
+                ElementData::Fill { loops, filled } => {
+                    let bb = el.bounding_box();
+                    if (bb.max_x - bb.min_x) * self.camera.scale < 1.0
+                        && (bb.max_y - bb.min_y) * self.camera.scale < 1.0
+                    {
+                        continue;
+                    }
+                    let (mx, my) = ((bb.min_x + bb.max_x) / 2.0, (bb.min_y + bb.max_y) / 2.0);
+                    let loops = loops
+                        .iter()
+                        .map(|l| {
+                            l.iter()
+                                .map(|p| {
+                                    self.camera.world_to_screen(
+                                        mx + (p.x - mx) * draw_scale,
+                                        my + (p.y - my) * draw_scale,
+                                    )
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    commands.push(RenderCommand::Fill {
+                        loops,
+                        filled: *filled,
+                        is_selected: el.is_selected,
+                        color: col,
+                    });
+                }
             }
         }
         commands
+    }
+    pub fn render_commands_at_target(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<RenderCommand> {
+        let saved = (self.camera.scale, self.camera.offset);
+        self.camera.scale = self.camera.target_scale;
+        self.camera.offset = self.camera.target_offset;
+        let r = self.get_render_commands_in(x0, y0, x1, y1);
+        self.camera.scale = saved.0;
+        self.camera.offset = saved.1;
+        r
     }
 }
 
@@ -1664,7 +1774,7 @@ fn prims(d: &ElementData) -> Vec<Prim> {
             let segs = if *closed { n } else { n.saturating_sub(1) };
             (0..segs).map(|i| Prim::Seg(points[i], points[(i + 1) % n])).collect()
         }
-        ElementData::Dimension { .. } => vec![],
+        ElementData::Dimension { .. } | ElementData::Fill { .. } => vec![],
     }
 }
 
@@ -1863,6 +1973,7 @@ fn offset_data(data: &ElementData, side: Point, dist: f64) -> Result<ElementData
             closed: *closed,
         }),
         ElementData::Dimension { .. } => Err("Dimensions can't be offset"),
+        ElementData::Fill { .. } => Err("Filled shapes can't be offset"),
     }
 }
 
@@ -1898,6 +2009,18 @@ impl ElementData {
                 .into_iter()
                 .map(|(a, b)| dist_point_seg(p, a, b))
                 .fold(f64::MAX, f64::min),
+            ElementData::Fill { loops, .. } => loops
+                .iter()
+                .map(|l| dist_to_loop(p, l))
+                .fold(f64::MAX, f64::min),
+        }
+    }
+
+    /// จุดอยู่ในพื้นที่ทึบหรือไม่ (ใช้เลือกด้วยการคลิกข้างใน)
+    pub fn fill_contains(&self, p: Point) -> bool {
+        match self {
+            ElementData::Fill { loops, filled: true } => point_in_loops(p, loops),
+            _ => false,
         }
     }
 
@@ -1941,8 +2064,53 @@ impl ElementData {
             ElementData::Dimension { start, end, offset } => dimension_segments(*start, *end, *offset)
                 .into_iter()
                 .any(|(a, b)| seg_hits_rect(a, b, r)),
+            ElementData::Fill { loops, filled } => {
+                let edge_hit = loops.iter().any(|l| {
+                    let n = l.len();
+                    n >= 2 && (0..n).any(|i| seg_hits_rect(l[i], l[(i + 1) % n], r))
+                });
+                edge_hit
+                    || (*filled
+                        && point_in_loops(
+                            Point { x: (r.min_x + r.max_x) / 2.0, y: (r.min_y + r.max_y) / 2.0 },
+                            loops,
+                        ))
+            }
         }
     }
+}
+
+fn dist_to_loop(p: Point, l: &[Point]) -> f64 {
+    let n = l.len();
+    match n {
+        0 => f64::MAX,
+        1 => (p.x - l[0].x).hypot(p.y - l[0].y),
+        _ => (0..n)
+            .map(|i| dist_point_seg(p, l[i], l[(i + 1) % n]))
+            .fold(f64::MAX, f64::min),
+    }
+}
+
+/// even-odd: จุดอยู่ข้างในถ้าตัดขอบเป็นจำนวนคี่
+fn point_in_loops(p: Point, loops: &[Vec<Point>]) -> bool {
+    let mut inside = false;
+    for l in loops {
+        let n = l.len();
+        if n < 3 {
+            continue;
+        }
+        let mut j = n - 1;
+        for i in 0..n {
+            let (a, b) = (l[i], l[j]);
+            if (a.y > p.y) != (b.y > p.y)
+                && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x
+            {
+                inside = !inside;
+            }
+            j = i;
+        }
+    }
+    inside
 }
 
 const TRIM_EPS: f64 = 1e-9;
@@ -2062,6 +2230,7 @@ fn trim_data(
         }
         ElementData::Polyline { points, closed } => trim_polyline(points, *closed, click, cutters),
         ElementData::Dimension { .. } => Err("Dimensions can't be trimmed"),
+        ElementData::Fill { .. } => Err("Filled shapes can't be trimmed"),
     }
 }
 
@@ -2142,6 +2311,7 @@ fn extend_data(
         ElementData::Circle { .. } => Err("Circles can't be extended"),
         ElementData::Polyline { points, closed } => extend_polyline(points, *closed, click, cutters, reach),
         ElementData::Dimension { .. } => Err("Dimensions can't be extended"),
+        ElementData::Fill { .. } => Err("Filled shapes can't be extended"),
     }
 }
 
@@ -2406,7 +2576,7 @@ fn sample_target(data: &ElementData) -> Vec<Point> {
             .map(|i| arc_point(*center, *radius, start_angle + (end_angle - start_angle) * i as f64 / 64.0))
             .collect(),
         ElementData::Polyline { points, .. } => points.clone(),
-        ElementData::Dimension { .. } => vec![],
+        ElementData::Dimension { .. } | ElementData::Fill { .. } => vec![],
     }
 }
 

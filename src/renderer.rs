@@ -61,6 +61,40 @@ impl Renderer for CairoRenderer<'_> {
                     }
                     let _ = cr.stroke();
                 }
+
+                RenderCommand::Fill { loops, filled, is_selected, color } => {
+                    for l in &loops {
+                        for (i, (x, y)) in l.iter().enumerate() {
+                            if i == 0 {
+                                cr.move_to(*x, *y);
+                            } else {
+                                cr.line_to(*x, *y);
+                            }
+                        }
+                        cr.close_path();
+                    }
+                    if filled {
+                        if is_selected {
+                            cr.set_source_rgba(1.0, 0.0, 0.0, 0.7);
+                        } else {
+                            cr.set_source_rgb(color.0, color.1, color.2);
+                        }
+                        cr.set_fill_rule(gtk::cairo::FillRule::EvenOdd);
+                        if is_selected {
+                            let _ = cr.fill_preserve();
+                            cr.set_source_rgb(1.0, 0.0, 0.0);
+                            cr.set_line_width(3.0);
+                            let _ = cr.stroke();
+                        } else {
+                            let _ = cr.fill();
+                        }
+                        cr.set_fill_rule(gtk::cairo::FillRule::Winding);
+                    } else {
+                        self.pen(is_selected, color);
+                        let _ = cr.stroke();
+                    }
+                }
+
                 RenderCommand::Dimension {
                     text_x, text_y, text, is_selected,
                     dim_x1, dim_y1, dim_x2, dim_y2,

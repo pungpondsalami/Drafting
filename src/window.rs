@@ -30,6 +30,7 @@ use gtk::{gio, glib};
 use std::cell::RefCell;
 use crate::renderer::{CairoRenderer, Renderer};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 glib::wrapper! {
     pub struct DraftingWindow(ObjectSubclass<imp::DraftingWindow>)
@@ -1496,7 +1497,6 @@ impl DraftingWindow {
                                 *imp.offset_msg.borrow_mut() =
                                     "Type a distance in the command bar first".into();
                             } else if imp.offset_anim.borrow().is_some() {
-                                // กำลังเล่นอนิเมชัน ไม่รับคลิก
                             } else if let Some(id) = imp.offset_source.get() {
                                 let side = Point { x: wx, y: wy };
                                 if d.offset_preview(id, side, dist).is_some() {
@@ -1627,13 +1627,15 @@ impl DraftingWindow {
         canvas.add_controller(click);
 
         // --- 5. Draw Function ---
+        let state: std::rc::Rc<RefCell<SceneState>> =
+            std::rc::Rc::new(RefCell::new(SceneState::default()));
         canvas.set_draw_func(glib::clone!(
             #[weak(rename_to = obj)]
             self,
             #[weak]
             page,
             move |_, cr, w, h| {
-                obj.draw_page(&page, cr, w as f64, h as f64);
+                obj.draw_page(&page, cr, w as f64, h as f64, &state);
             }
         ));
 
@@ -1641,13 +1643,65 @@ impl DraftingWindow {
         canvas.grab_focus();
     }
 
-    fn draw_page(&self, page: &adw::TabPage, cr: &gtk::cairo::Context, w: f64, h: f64) {
+    fn draw_page(
+        &self,
+        page: &adw::TabPage,
+        cr: &gtk::cairo::Context,
+        w: f64,
+        h: f64,
+        state: &std::rc::Rc<RefCell<SceneState>>,
+    ) {
         let imp = self.imp();
         let pages = imp.pages.borrow();
         let d_ref = match pages.get(page) {
             Some(r) => r,
             None => return,
         };
+
+        {
+            let mut dm = d_ref.borrow_mut();
+            if cam_moving(&dm.camera) {
+                let (ts, toff) = (dm.camera.target_scale, dm.camera.target_offset);
+                let want_key: SceneKey =
+                    (w as i32, h as i32, ts.to_bits(), toff.0.to_bits(), toff.1.to_bits());
+                let go = {
+                    let mut st = state.borrow_mut();
+                    let differs = st.cache.as_ref().map_or(true, |c| c.key != want_key);
+                    let since = match st.want {
+                        Some((k, t)) if k == want_key => t,
+                        _ => {
+                            let now = std::time::Instant::now();
+                            st.want = Some((want_key, now));
+                            now
+                        }
+                    };
+                    differs
+                        && !st.pending
+                        && since.elapsed() >= std::time::Duration::from_millis(80)
+                };
+                if go {
+                    let (mx, my) = (w * SCENE_MARGIN, h * SCENE_MARGIN);
+                    let s2w = |x: f64, y: f64| ((x - toff.0) / ts, -(y - toff.1) / ts);
+                    let commands = dm.render_commands_at_target(-mx, -my, w + mx, h + my);
+                    let (sx, sy) = cr.target().device_scale();
+                    spawn_scene_build(
+                        state,
+                        page.child(),
+                        SceneJob {
+                            w,
+                            h,
+                            sx,
+                            sy,
+                            key: want_key,
+                            tl: s2w(-mx, -my),
+                            br: s2w(w + mx, h + my),
+                            commands,
+                        },
+                    );
+                }
+            }
+        }
+
         let d = d_ref.borrow();
 
         let cam = &d.camera;
@@ -1655,71 +1709,78 @@ impl DraftingWindow {
         let (_ox, _oy) = cam.offset;
         let (rx, ry) = imp.mouse_pos.get();
 
-        // Background
-        cr.set_source_rgb(0.1, 0.1, 0.1);
-        let _ = cr.paint();
-
-        // Grid & Snap Calculation
-        let grid_base = 100.0;
-        let lod_raw = scale.log10();
-        let lod = lod_raw.floor();
-        let fraction = lod_raw - lod;
-
-        let step_major = grid_base / 10.0f64.powf(lod);
-        let step_minor = step_major / 10.0;
-        let step_giant = step_major * 10.0;
-
-        // --- คำนวณ Snap Position แบบคาดเดาได้ (Predictable) ---
+        // --- Snap position ---
         let (wx, wy) = cam.screen_to_world(rx, ry);
         let (sn_x, sn_y, snap_kind) =
             d.get_input_snap(wx, wy, imp.snap_enabled.get(), &imp.snap_settings.get());
 
-        // Grid Drawing Function
-        let draw_grid_line = |s: f64, alpha: f64, lw: f64| {
-            if alpha <= 0.02 || s * scale < 8.0 {
-                return;
+        paint_grid(cr, cam, w, h);
+
+        let (mx, my) = (w * SCENE_MARGIN, h * SCENE_MARGIN);
+        let (ew, eh) = (w + 2.0 * mx, h + 2.0 * my);
+        let cur_key: SceneKey = (
+            w as i32,
+            h as i32,
+            cam.scale.to_bits(),
+            cam.offset.0.to_bits(),
+            cam.offset.1.to_bits(),
+        );
+
+        if !cam_moving(cam) {
+            let cmds = d.get_render_commands_in(-mx, -my, w + mx, h + my);
+            let fresh = state
+                .borrow()
+                .cache
+                .as_ref()
+                .is_some_and(|c| c.key == cur_key && c.cmds == cmds);
+            if !fresh {
+                let (sx, sy) = cr.target().device_scale();
+                let job = SceneJob {
+                    w,
+                    h,
+                    sx,
+                    sy,
+                    key: cur_key,
+                    tl: cam.screen_to_world(-mx, -my),
+                    br: cam.screen_to_world(w + mx, h + my),
+                    commands: cmds,
+                };
+                let (cheap, pending) = {
+                    let st = state.borrow();
+                    (st.last_cost < std::time::Duration::from_millis(8), st.pending)
+                };
+                if cheap {
+                    let t0 = std::time::Instant::now();
+                    if let Some(done) = render_scene_job(job) {
+                        let mut st = state.borrow_mut();
+                        install_scene(&mut st, done);
+                        st.last_cost = t0.elapsed();
+                    }
+                } else if !pending {
+                    spawn_scene_build(state, page.child(), job);
+                }
             }
-            cr.set_source_rgba(0.5, 0.5, 0.5, alpha);
-            cr.set_line_width(lw);
+        }
 
-            // หาขอบเขตของโลก (World Bounds) ที่ปรากฏบนจอขณะนี้
-            let (w_min_x, w_max_y) = cam.screen_to_world(0.0, 0.0);
-            let (w_max_x, w_min_y) = cam.screen_to_world(w, h);
-
-            // วาดเส้นแนวตั้ง (Vertical Lines) - วิ่งตามแกน X
-            let mut x_cursor = (w_min_x / s).floor() * s;
-            while x_cursor <= w_max_x {
-                let (sx, _) = cam.world_to_screen(x_cursor, 0.0);
-                cr.move_to(sx, 0.0);
-                cr.line_to(sx, h);
-                x_cursor += s;
+        if let Some(c) = state.borrow().cache.as_ref() {
+            if c.key.0 == w as i32 && c.key.1 == h as i32 {
+                if c.key == cur_key {
+                    let _ = cr.set_source_surface(&c.surface, -mx, -my);
+                    let _ = cr.paint();
+                } else {
+                    let (p0x, p0y) = cam.world_to_screen(c.world_tl.0, c.world_tl.1);
+                    let (p1x, p1y) = cam.world_to_screen(c.world_br.0, c.world_br.1);
+                    cr.save().ok();
+                    cr.translate(p0x, p0y);
+                    cr.scale((p1x - p0x) / ew, (p1y - p0y) / eh);
+                    cr.set_source_surface(&c.surface, 0.0, 0.0).ok();
+                    cr.paint().ok();
+                    cr.restore().ok();
+                }
             }
-
-            let mut y_cursor = (w_min_y / s).floor() * s;
-            while y_cursor <= w_max_y {
-                let (_, sy) = cam.world_to_screen(0.0, y_cursor);
-                cr.move_to(0.0, sy);
-                cr.line_to(w, sy);
-                y_cursor += s;
-            }
-            let _ = cr.stroke();
-        };
-
-        // วาด Grid 3 ชั้น (Fade เข้า-ออก)
-
-        // --- Grid Logic ---
-
-        draw_grid_line(step_giant, (1.0 - fraction) * 0.15, 1.0);
-        draw_grid_line(step_major, 0.35, 0.8);
-        draw_grid_line(step_minor, fraction * 0.15, 0.75);
-
-        // Draw Elements
+        }
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.set_line_width(2.0);
-
-        // ขอรายการสิ่งที่ต้องวาดจาก Engine
-        let commands = d.get_render_commands(w, h);
-        CairoRenderer::new(cr).draw_commands(commands);
 
         let draw_dim_preview = |cr: &gtk::cairo::Context,
         cam: &crate::engine::Camera,
@@ -1854,6 +1915,23 @@ impl DraftingWindow {
                         }
                         let _ = cr.stroke();
                     }
+
+                    RenderCommand::Fill { loops, .. } => {
+                        cr.set_source_rgba(1.0, 0.5, 0.0, 0.4);
+                        cr.set_line_width(1.5);
+                        for l in &loops {
+                            for (i, (x, y)) in l.iter().enumerate() {
+                                if i == 0 {
+                                    cr.move_to(*x, *y);
+                                } else {
+                                    cr.line_to(*x, *y);
+                                }
+                            }
+                            cr.close_path();
+                        }
+                        let _ = cr.stroke();
+                    }
+
                     RenderCommand::Dimension { .. } => {} // placeholder
                 }
             }
@@ -2712,6 +2790,176 @@ impl DraftingWindow {
     }
 }
 
+const SCENE_MARGIN: f64 = 0.5;
+type SceneKey = (i32, i32, u64, u64, u64);
+
+#[derive(Debug)]
+struct SceneCache {
+    key: SceneKey,
+    world_tl: (f64, f64),
+    world_br: (f64, f64),
+    cmds: Vec<RenderCommand>,
+    surface: gtk::cairo::ImageSurface,
+}
+
+#[derive(Debug, Default)]
+struct SceneState {
+    cache: Option<SceneCache>,
+    pending: bool,
+    last_cost: std::time::Duration,
+    want: Option<(SceneKey, std::time::Instant)>,
+}
+
+struct SceneJob {
+    w: f64,
+    h: f64,
+    sx: f64,
+    sy: f64,
+    key: SceneKey,
+    tl: (f64, f64),
+    br: (f64, f64),
+    commands: Vec<RenderCommand>,
+}
+
+struct SceneDone {
+    key: SceneKey,
+    tl: (f64, f64),
+    br: (f64, f64),
+    commands: Vec<RenderCommand>,
+    data: Vec<u8>,
+    wpx: i32,
+    hpx: i32,
+    stride: i32,
+    sx: f64,
+    sy: f64,
+}
+
+fn cam_moving(c: &crate::engine::Camera) -> bool {
+    (c.scale / c.target_scale).ln().abs() > 0.00001
+        || (c.target_offset.0 - c.offset.0).abs() > 0.01
+        || (c.target_offset.1 - c.offset.1).abs() > 0.01
+}
+
+fn render_scene_job(job: SceneJob) -> Option<SceneDone> {
+    use gtk::cairo::{Context, Format, ImageSurface};
+    let (mx, my) = (job.w * SCENE_MARGIN, job.h * SCENE_MARGIN);
+    let (ew, eh) = (job.w + 2.0 * mx, job.h + 2.0 * my);
+    let (wpx, hpx) = ((ew * job.sx).ceil() as i32, (eh * job.sy).ceil() as i32);
+    let mut surface = ImageSurface::create(Format::ARgb32, wpx, hpx).ok()?;
+    surface.set_device_scale(job.sx, job.sy);
+    {
+        let sc = Context::new(&surface).ok()?;
+        sc.translate(mx, my);
+        paint_scene(&sc, job.commands.clone());
+    }
+    surface.flush();
+    let stride = surface.stride();
+    let data = surface.data().ok()?.to_vec();
+    Some(SceneDone {
+        key: job.key,
+        tl: job.tl,
+        br: job.br,
+        commands: job.commands,
+        data,
+        wpx,
+        hpx,
+        stride,
+        sx: job.sx,
+        sy: job.sy,
+    })
+}
+
+fn install_scene(state: &mut SceneState, done: SceneDone) {
+    use gtk::cairo::{Format, ImageSurface};
+    if let Ok(surface) =
+        ImageSurface::create_for_data(done.data, Format::ARgb32, done.wpx, done.hpx, done.stride)
+    {
+        surface.set_device_scale(done.sx, done.sy);
+        state.cache = Some(SceneCache {
+            key: done.key,
+            world_tl: done.tl,
+            world_br: done.br,
+            cmds: done.commands,
+            surface,
+        });
+    }
+}
+
+fn spawn_scene_build(
+    state: &std::rc::Rc<RefCell<SceneState>>,
+    area: gtk::Widget,
+    job: SceneJob,
+) {
+    state.borrow_mut().pending = true;
+    let state = state.clone();
+    glib::spawn_future_local(async move {
+        let t0 = std::time::Instant::now();
+        let res = gio::spawn_blocking(move || render_scene_job(job)).await;
+        {
+            let mut st = state.borrow_mut();
+            st.pending = false;
+            if let Ok(Some(done)) = res {
+                install_scene(&mut st, done);
+                st.last_cost = t0.elapsed();
+            }
+        }
+        area.queue_draw();
+    });
+}
+
+fn paint_grid(cr: &gtk::cairo::Context, cam: &crate::engine::Camera, w: f64, h: f64) {
+    let scale = cam.scale;
+
+    cr.set_source_rgb(0.1, 0.1, 0.1);
+    let _ = cr.paint();
+
+    let grid_base = 100.0;
+    let lod_raw = scale.log10();
+    let lod = lod_raw.floor();
+    let fraction = lod_raw - lod;
+    let step_major = grid_base / 10.0f64.powf(lod);
+    let step_minor = step_major / 10.0;
+    let step_giant = step_major * 10.0;
+
+    let draw_grid_line = |s: f64, alpha: f64, lw: f64| {
+        if alpha <= 0.02 || s * scale < 8.0 {
+            return;
+        }
+        cr.set_source_rgba(0.5, 0.5, 0.5, alpha);
+        cr.set_line_width(lw);
+
+        let (w_min_x, w_max_y) = cam.screen_to_world(0.0, 0.0);
+        let (w_max_x, w_min_y) = cam.screen_to_world(w, h);
+
+        let mut x_cursor = (w_min_x / s).floor() * s;
+        while x_cursor <= w_max_x {
+            let (sx, _) = cam.world_to_screen(x_cursor, 0.0);
+            cr.move_to(sx, 0.0);
+            cr.line_to(sx, h);
+            x_cursor += s;
+        }
+        let mut y_cursor = (w_min_y / s).floor() * s;
+        while y_cursor <= w_max_y {
+            let (_, sy) = cam.world_to_screen(0.0, y_cursor);
+            cr.move_to(0.0, sy);
+            cr.line_to(w, sy);
+            y_cursor += s;
+        }
+        let _ = cr.stroke();
+    };
+
+    draw_grid_line(step_giant, (1.0 - fraction) * 0.15, 1.0);
+    draw_grid_line(step_major, 0.35, 0.8);
+    draw_grid_line(step_minor, fraction * 0.15, 0.75);
+}
+
+/// เฉพาะวัตถุ วาดลง surface โปร่งใสที่แคชไว้
+fn paint_scene(cr: &gtk::cairo::Context, commands: Vec<RenderCommand>) {
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    cr.set_line_width(2.0);
+    CairoRenderer::new(cr).draw_commands(commands);
+}
+
 fn trace_element(cr: &gtk::cairo::Context, cam: &crate::engine::Camera, data: &ElementData) {
     match data {
         ElementData::Line { start, end } => {
@@ -2747,9 +2995,6 @@ fn trace_element(cr: &gtk::cairo::Context, cam: &crate::engine::Camera, data: &E
     }
 }
 
-// ===== วางใน src/window.rs ระดับบนสุด (ใกล้ bulge_segment) =====
-
-/// ประมาณ B-spline/NURBS เป็นจุดบนเส้นโค้ง (de Boor) ถ้า knots ไม่ครบ คืน None
 fn spline_points(
     degree: usize,
     knots: &[f64],
@@ -2896,6 +3141,157 @@ fn bulge_segment(p1: Point, p2: Point, bulge: f64) -> ElementData {
     ElementData::Arc { center, radius, start_angle: s, end_angle: e }
 }
 
+fn sample_arc(c: Point, r: f64, a0: f64, a1: f64, ccw: bool) -> Vec<Point> {
+    let mut e = a1;
+    if ccw {
+        while e <= a0 {
+            e += std::f64::consts::TAU;
+        }
+    } else {
+        while e >= a0 {
+            e -= std::f64::consts::TAU;
+        }
+    }
+    let span = e - a0;
+    let steps = ((span.abs() / std::f64::consts::TAU * 64.0).ceil() as usize).max(4);
+    (0..=steps)
+        .map(|i| {
+            let a = a0 + span * i as f64 / steps as f64;
+            Point { x: c.x + r * a.cos(), y: c.y + r * a.sin() }
+        })
+        .collect()
+}
+
+/// ช่วง bulge จาก p1 ไป p2 เป็นจุดต่อเนื่อง (รวมปลายทั้งสอง)
+fn bulge_points(p1: Point, p2: Point, bulge: f64) -> Vec<Point> {
+    match bulge_segment(p1, p2, bulge) {
+        ElementData::Arc { center, radius, start_angle, end_angle } => {
+            let mut v = sample_arc(center, radius, start_angle, end_angle, true);
+            // bulge ลบ: bulge_segment สลับหัวท้ายไว้ ให้หันกลับให้ตรงทิศ p1→p2
+            if bulge < 0.0 {
+                v.reverse();
+            }
+            v
+        }
+        _ => vec![p1, p2],
+    }
+}
+
+fn push_unique(out: &mut Vec<Point>, p: Point) {
+    if out.last().map_or(true, |l| (l.x - p.x).hypot(l.y - p.y) > 1e-9) {
+        out.push(p);
+    }
+}
+
+/// edge เดียวของ hatch boundary → จุด (ตามทิศของ edge)
+fn hatch_edge_points(e: &acadrust::entities::BoundaryEdge) -> Vec<Point> {
+    use acadrust::entities::BoundaryEdge as E;
+    match e {
+        E::Line(l) => vec![
+            Point { x: l.start.x, y: l.start.y },
+            Point { x: l.end.x, y: l.end.y },
+        ],
+        E::CircularArc(a) => sample_arc(
+            Point { x: a.center.x, y: a.center.y },
+            a.radius,
+            a.start_angle,
+            a.end_angle,
+            a.counter_clockwise,
+        ),
+        E::EllipticArc(a) => {
+            let (mut pts, _) = ellipse_points(
+                (a.center.x, a.center.y),
+                (a.major_axis_endpoint.x, a.major_axis_endpoint.y),
+                a.minor_axis_ratio,
+                a.start_angle,
+                a.end_angle,
+            );
+            if !a.counter_clockwise {
+                pts.reverse();
+            }
+            pts
+        }
+        E::Spline(s) => {
+            let src: Vec<(f64, f64)> = if s.fit_points.len() >= 2 {
+                s.fit_points.iter().map(|v| (v.x, v.y)).collect()
+            } else {
+                s.control_points.iter().map(|v| (v.x, v.y)).collect()
+            };
+            polyline_through(&src)
+        }
+        E::Polyline(p) => {
+            let n = p.vertices.len();
+            let segs = if p.is_closed { n } else { n.saturating_sub(1) };
+            let mut out = Vec::new();
+            for i in 0..segs {
+                let (a, b) = (p.vertices[i], p.vertices[(i + 1) % n]);
+                let (pa, pb) = (Point { x: a.x, y: a.y }, Point { x: b.x, y: b.y });
+                for q in bulge_points(pa, pb, a.z) {
+                    push_unique(&mut out, q);
+                }
+            }
+            if n == 1 {
+                out.push(Point { x: p.vertices[0].x, y: p.vertices[0].y });
+            }
+            out
+        }
+    }
+}
+
+/// Solid/Trace → พื้นที่ทึบ (ใช้ลำดับมุมตามขอบจริง)
+fn fill_from_solid(s: &acadrust::entities::Solid) -> ElementData {
+    let pts: Vec<Point> =
+        s.boundary_corners().iter().map(|v| Point { x: v.x, y: v.y }).collect();
+    ElementData::Fill { loops: vec![pts], filled: true }
+}
+
+/// Hatch → loops ของขอบเขต (วาดทึบถ้าเป็น solid/gradient, ไม่งั้นวาดแค่ขอบ)
+fn fill_from_hatch(h: &acadrust::entities::Hatch) -> Option<ElementData> {
+    let mut loops: Vec<Vec<Point>> = Vec::new();
+    for path in &h.paths {
+        let mut pts: Vec<Point> = Vec::new();
+        for edge in &path.edges {
+            let mut seg = hatch_edge_points(edge);
+            if seg.is_empty() {
+                continue;
+            }
+            // edge ที่ต่อมาเป็นทิศกลับ → กลับด้านให้ต่อกันได้
+            if let Some(last) = pts.last() {
+                let d = |p: &Point| (p.x - last.x).hypot(p.y - last.y);
+                if d(&seg[0]) > d(&seg[seg.len() - 1]) {
+                    seg.reverse();
+                }
+            }
+            for q in seg {
+                push_unique(&mut pts, q);
+            }
+        }
+        if pts.len() >= 2 {
+            if let (Some(f), Some(l)) = (pts.first().copied(), pts.last().copied()) {
+                if pts.len() > 2 && (f.x - l.x).hypot(f.y - l.y) < 1e-9 {
+                    pts.pop();
+                }
+            }
+        }
+        if pts.len() >= 3 {
+            loops.push(pts);
+        }
+    }
+    if loops.is_empty() {
+        return None;
+    }
+    let filled = h.is_solid || h.gradient_color.enabled;
+    Some(ElementData::Fill { loops, filled })
+}
+
+// ===== arm ใหม่ใน match ของ dxf_to_elements (ก่อน `_ => skipped += 1`) =====
+//
+//     EntityType::Solid(s) => out.push(fill_from_solid(s)),
+//     EntityType::Hatch(h) => match fill_from_hatch(h) {
+//         Some(d) => out.push(d),
+//         None => skipped += 1,
+//     },
+
 fn dxf_filters() -> (gtk::FileFilter, gio::ListStore, gtk::FileFilter) {
     let f = gtk::FileFilter::new();
     f.set_name(Some("DXF Drawing (*.dxf)"));
@@ -3013,6 +3409,13 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
                 );
                 out.push(ElementData::Polyline { points, closed: full });
             }
+
+            EntityType::Solid(s) => out.push(fill_from_solid(s)),
+            EntityType::Hatch(h) => match fill_from_hatch(h) {
+                Some(d) => out.push(d),
+                None => skipped += 1,
+            },
+
             _ => skipped += 1,
         }
         for data in out {
@@ -3031,12 +3434,15 @@ fn to_ac_color(c: Rgb) -> acadrust::Color {
 }
 
 fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> {
-    use acadrust::entities::{Arc, Circle, Line, LwPolyline, LwVertex};
+    use acadrust::entities::{
+        Arc, BoundaryEdge, BoundaryPath, Circle, Hatch, Line, LwPolyline, LwVertex, PolylineEdge, Solid,
+    };
     use acadrust::tables::Layer as AcLayer;
-    use acadrust::{CadDocument, DxfWriter, EntityType, Vector3};
+    use acadrust::{CadDocument, DxfWriter, EntityType, Vector2, Vector3};
 
     let mut doc = CadDocument::new();
 
+    // ตาราง layer ("0" มีอยู่แล้วในไฟล์ใหม่ → แก้ของเดิม ไม่เพิ่มซ้ำ)
     for l in &data.layers {
         if let Some(ex) = doc.layers.get_mut(&l.name) {
             ex.color = to_ac_color(l.color);
@@ -3091,6 +3497,38 @@ fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> 
                     *start_angle,
                     *end_angle,
                 )))?
+            }
+            ElementData::Fill { loops, filled } => {
+                let v3 = |p: &Point| Vector3::new(p.x, p.y, 0.0);
+                let simple = loops.len() == 1 && (loops[0].len() == 3 || loops[0].len() == 4);
+                if *filled && simple {
+                    // ลำดับมุมที่เก็บใน DXF: 1, 2, 4, 3 (สลับสองตัวท้าย)
+                    let l = &loops[0];
+                    let sol = if l.len() == 3 {
+                        Solid::triangle(v3(&l[0]), v3(&l[1]), v3(&l[2]))
+                    } else {
+                        Solid::new(v3(&l[0]), v3(&l[1]), v3(&l[3]), v3(&l[2]))
+                    };
+                    push(EntityType::Solid(sol))?;
+                } else if *filled {
+                    let mut h = Hatch::solid();
+                    for l in loops {
+                        let mut path = BoundaryPath::external();
+                        path.add_edge(BoundaryEdge::Polyline(PolylineEdge::new(
+                            l.iter().map(|p| Vector2::new(p.x, p.y)).collect(),
+                            true,
+                        )));
+                        h.add_path(path);
+                    }
+                    push(EntityType::Hatch(Box::new(h)))?;
+                } else {
+                    for l in loops {
+                        let mut p = LwPolyline::new();
+                        p.vertices = l.iter().map(|q| LwVertex::from_coords(q.x, q.y)).collect();
+                        p.is_closed = true;
+                        push(EntityType::LwPolyline(p))?;
+                    }
+                }
             }
             ElementData::Polyline { points, closed } => {
                 let mut p = LwPolyline::new();
