@@ -156,7 +156,8 @@ Open the panel with the layers button in the right dock (or type `la`).
 - **Eye**: show or hide a layer. Hidden layers can't be picked or selected, and they are ignored by object snap and by Trim/Extend.
 - **Lock**: locked layers stay visible and snappable (and still act as cutting edges), but their objects can't be selected or edited. The lock state is not saved to DXF.
 - **Click a name** to make it the current layer. New objects are created on it.
-- Layers, their colors and per-object colors are read from DXF files and written back when you save. Creating, renaming and deleting layers is not available yet.
+- Layers, their colors and per-object colors are read from DXF files and written back when you save.
+- Right-click a layer name to rename or delete it (its objects move to layer 0). Layer add/rename/colour/delete can be undone with Ctrl+Z.
 
 ## License
 
