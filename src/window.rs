@@ -1780,7 +1780,8 @@ impl DraftingWindow {
             }
         }
         cr.set_source_rgb(1.0, 1.0, 1.0);
-        cr.set_line_width(2.0);
+        let lw = if scale < 0.2 { 1.0 } else { 2.0 };
+        cr.set_line_width(lw);
 
         let draw_dim_preview = |cr: &gtk::cairo::Context,
         cam: &crate::engine::Camera,
