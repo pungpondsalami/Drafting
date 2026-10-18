@@ -24,6 +24,7 @@ mod window;
 mod engine;
 mod spatial;
 mod renderer;
+mod text;
 
 use self::application::DraftingApplication;
 use self::window::DraftingWindow;
@@ -38,7 +39,7 @@ fn main() -> glib::ExitCode {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-    
+
         if let Some(dir) = exe_dir {
             let fonts_conf = dir.join("fonts.conf");
             if fonts_conf.exists() {
@@ -66,7 +67,7 @@ fn main() -> glib::ExitCode {
         let mut test_engine = crate::engine::Engine::new();
         test_engine.camera.target_scale = 2.0;
         println!("--- Engine Logic Check ---");
-        test_engine.step(100_000); 
+        test_engine.step(100_000);
         println!("Scale after 0.1s: {:.4}", test_engine.camera.scale);
         println!("--- Logic OK, Launching UI... ---\n");
     }

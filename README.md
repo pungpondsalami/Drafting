@@ -23,6 +23,7 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Undo / Redo
 - Command bar interface
 - Auto-pan at window edges
+- Text and MText display (read, move, copy and save)
 
 ## DXF Support
 
@@ -39,8 +40,9 @@ DXF files are read with [acadrust](https://crates.io/crates/acadrust) (newer DXF
 | Linear dimension | No | Saved as three plain lines |
 | Layers | Read/Write, true color, on/off and lock state | Read/Write, true color and on/off state |
 | Entity color | ACI and true color | True color is saved as the nearest ACI color |
+| Text / MText | Yes (plain text only; formatting is dropped) | Saved as TEXT, or MTEXT when multi-line |
 
-Other entity types (hatch, solid, text, block inserts, tables, ...) are skipped when opening a file.
+Other entity types (block inserts, tables, dimensions other than linear, ...) are skipped when opening a file.
 
 ## Installation
 

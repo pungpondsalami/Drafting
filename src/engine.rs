@@ -4,6 +4,7 @@ use crate::spatial::BoundingBox;
 use crate::spatial::SpatialIndex;
 use std::path::PathBuf;
 use std::f64::consts::{FRAC_PI_2, TAU};
+use crate::text::{self, HAlign, VAlign};
 
 pub const DEFAULT_DIMENSION_OFFSET: f64 = 30.0;
 
@@ -169,6 +170,17 @@ pub enum ElementData {
     Polyline { points: Vec<Point>, closed: bool },
     /// พื้นที่ทึบ/hatch: หลาย loop (even-odd) filled=false → วาดแต่เส้นขอบ
     Fill { loops: Vec<Vec<Point>>, filled: bool },
+    /// ข้อความ: pos = จุดยึด, height = ความสูงตัวพิมพ์ใหญ่, rotation เรเดียนทวนเข็ม,
+    /// text ขึ้นบรรทัดใหม่ด้วย '\n', width > 0 = ตัดบรรทัดที่ความกว้างนี้ (MTEXT)
+    Text {
+        pos: Point,
+        height: f64,
+        rotation: f64,
+        text: String,
+        halign: HAlign,
+        valign: VAlign,
+        width: f64,
+    },
 }
 
 impl ElementData {
@@ -190,6 +202,10 @@ impl ElementData {
                     p.y += dy;
                 }
             }
+            ElementData::Text { pos, .. } => {
+                pos.x += dx;
+                pos.y += dy;
+            }
             ElementData::Fill { loops, .. } => {
                 for p in loops.iter_mut().flatten() {
                     p.x += dx;
@@ -206,6 +222,7 @@ impl ElementData {
             ElementData::Polyline { points, .. } => {
                 points.first().copied().unwrap_or(Point { x: 0.0, y: 0.0 })
             }
+            ElementData::Text { pos, .. } => *pos,
             ElementData::Fill { loops, .. } => loops
                 .iter()
                 .flatten()
@@ -302,6 +319,19 @@ pub enum RenderCommand {
         is_selected: bool,
         color: (f64, f64, f64),
     },
+    /// พิกัดและขนาดเป็นพิกเซลหน้าจอแล้ว; em_px = ขนาด em ของฟอนต์, wrap_px > 0 = ตัดบรรทัด
+    Text {
+        x: f64,
+        y: f64,
+        em_px: f64,
+        rotation: f64,
+        wrap_px: f64,
+        text: String,
+        halign: HAlign,
+        valign: VAlign,
+        is_selected: bool,
+        color: (f64, f64, f64),
+    },
 }
 
 #[derive(Debug)]
@@ -366,6 +396,9 @@ impl DrawingElement {
                     b.max_y = b.max_y.max(p.y);
                 }
                 b
+            }
+            ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
+                text::bbox(*pos, *height, *rotation, text, *halign, *valign, *width)
             }
             ElementData::Fill { loops, .. } => {
                 let mut b = BoundingBox {
@@ -598,7 +631,7 @@ impl Engine {
         let i = self.index_of(id)?;
         if matches!(
             self.history[i].data,
-            ElementData::Dimension { .. } | ElementData::Fill { .. }
+            ElementData::Dimension { .. } | ElementData::Fill { .. } | ElementData::Text { .. }
         ) {
             return None;
         }
@@ -978,6 +1011,21 @@ impl Engine {
                         }
                         ElementData::Dimension { .. } => {
                             // Skip dimension in array preview for now
+                        }
+                        ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
+                            let p = self.camera.world_to_screen(pos.x + offset_x, pos.y + offset_y);
+                            previews.push(RenderCommand::Text {
+                                x: p.0,
+                                y: p.1,
+                                em_px: height * text::EM_PER_HEIGHT * self.camera.scale,
+                                rotation: *rotation,
+                                wrap_px: width * self.camera.scale,
+                                text: text.clone(),
+                                halign: *halign,
+                                valign: *valign,
+                                is_selected: true,
+                                color: (1.0, 1.0, 1.0),
+                            });
                         }
                     }
                 }
@@ -1387,6 +1435,7 @@ impl Engine {
                         }
                     }
                 }
+                ElementData::Text { pos, .. } => consider(*pos, SnapKind::Endpoint),
                 ElementData::Fill { loops, .. } => {
                     for p in loops.iter().flatten().take(256) {
                         consider(*p, SnapKind::Endpoint);
@@ -1589,6 +1638,25 @@ impl Engine {
                         color: col,
                     });
                 }
+                ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
+                    let em_px = height * text::EM_PER_HEIGHT * self.camera.scale * draw_scale;
+                    if em_px < 3.0 {
+                        continue; // เล็กเกินอ่าน ไม่ต้องวาด
+                    }
+                    let s = self.camera.world_to_screen(pos.x, pos.y);
+                    commands.push(RenderCommand::Text {
+                        x: s.0,
+                        y: s.1,
+                        em_px,
+                        rotation: *rotation,
+                        wrap_px: width * self.camera.scale,
+                        text: text.clone(),
+                        halign: *halign,
+                        valign: *valign,
+                        is_selected: el.is_selected,
+                        color: col,
+                    });
+                }
                 ElementData::Fill { loops, filled } => {
                     let bb = el.bounding_box();
                     if (bb.max_x - bb.min_x) * self.camera.scale < 1.0
@@ -1774,7 +1842,7 @@ fn prims(d: &ElementData) -> Vec<Prim> {
             let segs = if *closed { n } else { n.saturating_sub(1) };
             (0..segs).map(|i| Prim::Seg(points[i], points[(i + 1) % n])).collect()
         }
-        ElementData::Dimension { .. } | ElementData::Fill { .. } => vec![],
+        ElementData::Dimension { .. } | ElementData::Fill { .. } | ElementData::Text { .. } => vec![],
     }
 }
 
@@ -1974,6 +2042,7 @@ fn offset_data(data: &ElementData, side: Point, dist: f64) -> Result<ElementData
         }),
         ElementData::Dimension { .. } => Err("Dimensions can't be offset"),
         ElementData::Fill { .. } => Err("Filled shapes can't be offset"),
+        ElementData::Text { .. } => Err("Text can't be offset"),
     }
 }
 
@@ -2009,6 +2078,9 @@ impl ElementData {
                 .into_iter()
                 .map(|(a, b)| dist_point_seg(p, a, b))
                 .fold(f64::MAX, f64::min),
+            ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
+                text::edge_distance(p, *pos, *height, *rotation, text, *halign, *valign, *width)
+            }
             ElementData::Fill { loops, .. } => loops
                 .iter()
                 .map(|l| dist_to_loop(p, l))
@@ -2020,6 +2092,9 @@ impl ElementData {
     pub fn fill_contains(&self, p: Point) -> bool {
         match self {
             ElementData::Fill { loops, filled: true } => point_in_loops(p, loops),
+            ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
+                text::contains(p, *pos, *height, *rotation, text, *halign, *valign, *width)
+            }
             _ => false,
         }
     }
@@ -2064,6 +2139,12 @@ impl ElementData {
             ElementData::Dimension { start, end, offset } => dimension_segments(*start, *end, *offset)
                 .into_iter()
                 .any(|(a, b)| seg_hits_rect(a, b, r)),
+            ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
+                let c = text::corners(*pos, *height, *rotation, text, *halign, *valign, *width);
+                let centre = Point { x: (r.min_x + r.max_x) / 2.0, y: (r.min_y + r.max_y) / 2.0 };
+                (0..4).any(|i| seg_hits_rect(c[i], c[(i + 1) % 4], r))
+                    || text::contains(centre, *pos, *height, *rotation, text, *halign, *valign, *width)
+            }
             ElementData::Fill { loops, filled } => {
                 let edge_hit = loops.iter().any(|l| {
                     let n = l.len();
@@ -2231,6 +2312,7 @@ fn trim_data(
         ElementData::Polyline { points, closed } => trim_polyline(points, *closed, click, cutters),
         ElementData::Dimension { .. } => Err("Dimensions can't be trimmed"),
         ElementData::Fill { .. } => Err("Filled shapes can't be trimmed"),
+        ElementData::Text { .. } => Err("Text can't be trimmed"),
     }
 }
 
@@ -2312,6 +2394,7 @@ fn extend_data(
         ElementData::Polyline { points, closed } => extend_polyline(points, *closed, click, cutters, reach),
         ElementData::Dimension { .. } => Err("Dimensions can't be extended"),
         ElementData::Fill { .. } => Err("Filled shapes can't be extended"),
+        ElementData::Text { .. } => Err("Text can't be extended"),
     }
 }
 
@@ -2576,7 +2659,7 @@ fn sample_target(data: &ElementData) -> Vec<Point> {
             .map(|i| arc_point(*center, *radius, start_angle + (end_angle - start_angle) * i as f64 / 64.0))
             .collect(),
         ElementData::Polyline { points, .. } => points.clone(),
-        ElementData::Dimension { .. } | ElementData::Fill { .. } => vec![],
+        ElementData::Dimension { .. } | ElementData::Fill { .. } | ElementData::Text { .. } => vec![],
     }
 }
 

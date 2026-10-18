@@ -1934,6 +1934,10 @@ impl DraftingWindow {
                     }
 
                     RenderCommand::Dimension { .. } => {} // placeholder
+                    RenderCommand::Text { x, y, em_px, rotation, wrap_px, text, halign, valign, .. } => {
+                        cr.set_source_rgba(1.0, 0.5, 0.0, 0.4);
+                        crate::renderer::draw_text(cr, x, y, em_px, rotation, wrap_px, &text, halign, valign);
+                    }
                 }
             }
         }
@@ -3421,6 +3425,15 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
                 None => skipped += 1,
             },
 
+            EntityType::Text(t) => match crate::text::from_dxf_text(t) {
+                Some(d) => out.push(d),
+                None => skipped += 1,
+            },
+            EntityType::MText(m) => match crate::text::from_dxf_mtext(m) {
+                Some(d) => out.push(d),
+                None => skipped += 1,
+            },
+
             _ => skipped += 1,
         }
         for data in out {
@@ -3535,6 +3548,9 @@ fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> 
                     }
                 }
             }
+            ElementData::Text { pos, height, rotation, text, halign, valign, width } => push(
+                crate::text::to_dxf_entity(*pos, *height, *rotation, text, *halign, *valign, *width),
+            )?,
             ElementData::Polyline { points, closed } => {
                 let mut p = LwPolyline::new();
                 p.vertices = points.iter().map(|q| LwVertex::from_coords(q.x, q.y)).collect();

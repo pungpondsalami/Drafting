@@ -1,4 +1,6 @@
 use crate::engine::RenderCommand;
+use crate::text::{HAlign, VAlign};
+use gtk::pango;
 
 pub trait Renderer {
     fn draw_commands(&mut self, commands: Vec<RenderCommand>);
@@ -23,6 +25,74 @@ impl<'a> CairoRenderer<'a> {
             self.cr.set_line_width(2.0);
         }
     }
+}
+
+/// วาดข้อความด้วย Pango ที่จุดยึด (x, y) บนจอ ด้วยสีที่ตั้งไว้ใน cr ตอนนี้
+///
+/// จัดวางที่ขนาดคงที่ 100 หน่วยแล้วย่อ/ขยายด้วย cr.scale ทำให้การตัดบรรทัดไม่เปลี่ยนตามระดับซูม
+#[allow(clippy::too_many_arguments)]
+pub fn draw_text(
+    cr: &gtk::cairo::Context,
+    x: f64,
+    y: f64,
+    em_px: f64,
+    rotation: f64,
+    wrap_px: f64,
+    text: &str,
+    halign: HAlign,
+    valign: VAlign,
+) {
+    const NOMINAL: f64 = 100.0;
+    let k = em_px / NOMINAL;
+    if !(k > 0.0) || !k.is_finite() {
+        return;
+    }
+    let scale = pango::SCALE as f64;
+
+    let _ = cr.save();
+    cr.translate(x, y);
+    cr.rotate(-rotation); // แกน Y บนจอกลับด้าน
+    cr.scale(k, k);
+
+    let layout = pangocairo::functions::create_layout(cr);
+    let mut font = pango::FontDescription::new();
+    font.set_family("Sans");
+    font.set_absolute_size(NOMINAL * scale);
+    layout.set_font_description(Some(&font));
+    layout.set_text(text);
+    layout.set_alignment(match halign {
+        HAlign::Left => pango::Alignment::Left,
+        HAlign::Center => pango::Alignment::Center,
+        HAlign::Right => pango::Alignment::Right,
+    });
+    let wrap = wrap_px > 0.0;
+    if wrap {
+        layout.set_width(((wrap_px / k) * scale) as i32);
+        layout.set_wrap(pango::WrapMode::WordChar);
+    }
+
+    let (_, logical) = layout.extents();
+    let lw = logical.width() as f64 / scale;
+    let lh = logical.height() as f64 / scale;
+    let box_w = if wrap { wrap_px / k } else { lw };
+    let baseline = layout.baseline() as f64 / scale;
+
+    let dx = match halign {
+        HAlign::Left => 0.0,
+        HAlign::Center => -box_w / 2.0,
+        HAlign::Right => -box_w,
+    };
+    let dy = match valign {
+        VAlign::Top => 0.0,
+        VAlign::Middle => -lh / 2.0,
+        VAlign::Bottom => -lh,
+        VAlign::Baseline => -baseline,
+    };
+    cr.move_to(dx, dy);
+    pangocairo::functions::show_layout(cr, &layout);
+
+    let _ = cr.restore();
+    cr.new_path();
 }
 
 impl Renderer for CairoRenderer<'_> {
@@ -93,6 +163,17 @@ impl Renderer for CairoRenderer<'_> {
                         self.pen(is_selected, color);
                         let _ = cr.stroke();
                     }
+                }
+
+                RenderCommand::Text {
+                    x, y, em_px, rotation, wrap_px, text, halign, valign, is_selected, color,
+                } => {
+                    if is_selected {
+                        cr.set_source_rgb(1.0, 0.0, 0.0);
+                    } else {
+                        cr.set_source_rgb(color.0, color.1, color.2);
+                    }
+                    draw_text(cr, x, y, em_px, rotation, wrap_px, &text, halign, valign);
                 }
 
                 RenderCommand::Dimension {
