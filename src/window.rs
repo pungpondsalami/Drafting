@@ -140,6 +140,15 @@ mod imp {
         #[template_child]
         pub layer_list: TemplateChild<gtk::ListBox>,
         pub building_layers: Cell<bool>,
+        pub space_down: Cell<bool>,
+        pub space_pan: Cell<bool>,
+        pub lw_drop: RefCell<Option<gtk::DropDown>>,
+        pub lt_drop: RefCell<Option<gtk::DropDown>>,
+        pub sel_box: RefCell<Option<gtk::Box>>,
+        pub sel_label: RefCell<Option<gtk::Label>>,
+        pub sel_lw_drop: RefCell<Option<gtk::DropDown>>,
+        pub sel_lt_drop: RefCell<Option<gtk::DropDown>>,
+        pub sel_key: Cell<(usize, u64)>,
         #[template_child]
         pub btn_layer_add: TemplateChild<gtk::Button>,
         #[template_child]
@@ -232,6 +241,12 @@ mod imp {
                     let is_ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                     let is_shift = state.contains(gdk::ModifierType::SHIFT_MASK);
                     let typing = obj.is_typing();
+
+                    // Space ค้าง + ลากเมาส์ = เลื่อน canvas
+                    if key == gdk::Key::space && !typing && !is_ctrl {
+                        obj.imp().space_down.set(true);
+                        return glib::Propagation::Stop;
+                    }
 
                     if key == gdk::Key::Shift_L || key == gdk::Key::Shift_R {
                         obj.set_shift(true);
@@ -361,10 +376,19 @@ mod imp {
                     if key == gdk::Key::Shift_L || key == gdk::Key::Shift_R {
                         obj.set_shift(false);
                     }
+                    if key == gdk::Key::space {
+                        obj.imp().space_down.set(false);
+                    }
                 }
             ));
 
             obj.add_controller(key_ctrl);
+            // สลับหน้าต่างตอนกด Space ค้าง จะไม่รับ key release → เคลียร์เอง
+            obj.connect_is_active_notify(|w| {
+                if !w.is_active() {
+                    w.imp().space_down.set(false);
+                }
+            });
 
             // ปิด Revealer เมื่อกดปุ่ม Apply
             self.btn_apply_array.connect_clicked(glib::clone!(
@@ -866,6 +890,7 @@ mod imp {
                     if let Some(row) = row {
                         let i = row.index() as usize;
                         obj.with_engine(|d| d.set_current_layer(i));
+                        obj.sync_line_style_ui();
                     }
                 }
             ));
@@ -892,6 +917,9 @@ mod imp {
                     }
                 }
             ));
+
+            obj.build_line_style_ui();
+            obj.build_selection_style_ui();
 
             // สร้างหน้าแรกทันที
             obj.create_new_tab("Drawing 1");
@@ -1121,7 +1149,7 @@ impl DraftingWindow {
             .insert(page.clone(), RefCell::new(data));
 
         // --- 1. Zoom (Scroll) ---
-        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
         scroll.connect_scroll(glib::clone!(
             #[weak(rename_to = obj)]
             self,
@@ -1129,13 +1157,26 @@ impl DraftingWindow {
             page,
             #[upgrade_or]
             glib::Propagation::Stop,
-            move |_, _, dy| {
+            move |ctrl, dx, dy| {
+                // ทัชแพด (หน่วยพิกเซล) = เลื่อน, ล้อเมาส์หรือ Ctrl+scroll = ซูม
+                let touchpad = ctrl.unit() == gdk::ScrollUnit::Surface;
+                let ctrl_down = ctrl
+                    .current_event_state()
+                    .contains(gdk::ModifierType::CONTROL_MASK);
+                if !touchpad && dy == 0.0 {
+                    return glib::Propagation::Proceed; // ล้อเอียงของเมาส์
+                }
                 let pages = obj.imp().pages.borrow();
                 if let Some(d_ref) = pages.get(&page) {
                     let mut d = d_ref.borrow_mut();
                     let (mx, my) = obj.imp().mouse_pos.get();
 
-                    if dy < 0.0 {
+                    if touchpad && !ctrl_down {
+                        const PAN_GAIN: f64 = 1.5;
+                        d.camera.target_offset.0 -= dx * PAN_GAIN;
+                        d.camera.target_offset.1 -= dy * PAN_GAIN;
+                        d.camera.offset = d.camera.target_offset;
+                    } else if dy < 0.0 {
                         d.camera.zoom_in_at(mx, my);
                     } else {
                         d.camera.zoom_out_at(mx, my);
@@ -1145,6 +1186,137 @@ impl DraftingWindow {
             }
         ));
         canvas.add_controller(scroll);
+
+        // --- 1b. Pan: กดปุ่มกลาง (ล้อ) ค้างแล้วลาก ---
+        let pan = gtk::GestureDrag::builder().button(2).build();
+        let pan_origin: Rc<std::cell::Cell<(f64, f64)>> = Rc::new(std::cell::Cell::new((0.0, 0.0)));
+        pan.connect_drag_begin(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            #[weak]
+            page,
+            #[strong]
+            pan_origin,
+            move |_, _, _| {
+                let pages = obj.imp().pages.borrow();
+                if let Some(d_ref) = pages.get(&page) {
+                    pan_origin.set(d_ref.borrow().camera.target_offset);
+                }
+            }
+        ));
+        pan.connect_drag_update(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            #[weak]
+            page,
+            #[strong]
+            pan_origin,
+            move |_, dx, dy| {
+                {
+                    let pages = obj.imp().pages.borrow();
+                    if let Some(d_ref) = pages.get(&page) {
+                        let mut d = d_ref.borrow_mut();
+                        let (ox, oy) = pan_origin.get();
+                        let to = (ox + dx, oy + dy);
+                        d.camera.target_offset = to;
+                        d.camera.offset = to; // ตามเมาส์ทันที ไม่หน่วง
+                    }
+                }
+                page.child().queue_draw();
+            }
+        ));
+        canvas.add_controller(pan);
+
+        // Space + ปุ่มซ้ายลาก
+        let pan1 = gtk::GestureDrag::builder().button(1).build();
+        let pan1_on: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+        pan1.connect_drag_begin(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            #[weak]
+            page,
+            #[strong]
+            pan_origin,
+            #[strong]
+            pan1_on,
+            move |_, _, _| {
+                let on = obj.imp().space_down.get();
+                pan1_on.set(on);
+                if on {
+                    let pages = obj.imp().pages.borrow();
+                    if let Some(d_ref) = pages.get(&page) {
+                        pan_origin.set(d_ref.borrow().camera.target_offset);
+                    }
+                }
+            }
+        ));
+        pan1.connect_drag_update(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            #[weak]
+            page,
+            #[strong]
+            pan_origin,
+            #[strong]
+            pan1_on,
+            move |_, dx, dy| {
+                if !pan1_on.get() {
+                    return;
+                }
+                {
+                    let pages = obj.imp().pages.borrow();
+                    if let Some(d_ref) = pages.get(&page) {
+                        let mut d = d_ref.borrow_mut();
+                        let (ox, oy) = pan_origin.get();
+                        let to = (ox + dx, oy + dy);
+                        d.camera.target_offset = to;
+                        d.camera.offset = to;
+                    }
+                }
+                page.child().queue_draw();
+            }
+        ));
+        canvas.add_controller(pan1);
+
+        // ทัชแพด: pinch ซูมรอบจุดกึ่งกลางนิ้ว
+        let pinch = gtk::GestureZoom::new();
+        let pinch_base: Rc<std::cell::Cell<f64>> = Rc::new(std::cell::Cell::new(1.0));
+        pinch.connect_begin(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            #[weak]
+            page,
+            #[strong]
+            pinch_base,
+            move |_, _| {
+                let pages = obj.imp().pages.borrow();
+                if let Some(d_ref) = pages.get(&page) {
+                    pinch_base.set(d_ref.borrow().camera.target_scale);
+                }
+            }
+        ));
+        pinch.connect_scale_changed(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            #[weak]
+            page,
+            #[strong]
+            pinch_base,
+            move |g, scale| {
+                let Some((sx, sy)) = g.bounding_box_center() else { return };
+                let pages = obj.imp().pages.borrow();
+                if let Some(d_ref) = pages.get(&page) {
+                    let mut d = d_ref.borrow_mut();
+                    let cam = &mut d.camera;
+                    let wx = (sx - cam.target_offset.0) / cam.target_scale;
+                    let wy = -(sy - cam.target_offset.1) / cam.target_scale;
+                    cam.target_scale = (pinch_base.get() * scale).clamp(0.01, 50.0);
+                    cam.target_offset.0 = sx - wx * cam.target_scale;
+                    cam.target_offset.1 = sy + wy * cam.target_scale;
+                }
+            }
+        ));
+        canvas.add_controller(pinch);
 
         // --- 2. Smooth Animation (Tick) ---
         canvas.add_tick_callback(glib::clone!(
@@ -1156,6 +1328,7 @@ impl DraftingWindow {
             glib::ControlFlow::Continue,
             move |area, clock| {
                 obj.sync_tool_buttons();
+                obj.sync_selection_ui();
                 let pages = obj.imp().pages.borrow();
                 if let Some(d_ref) = pages.get(&page) {
                     let mut d = d_ref.borrow_mut();
@@ -1315,7 +1488,7 @@ impl DraftingWindow {
         canvas.add_controller(motion);
 
         // --- 4. Drawing (Click) ---
-        let click = gtk::GestureClick::new();
+        let click = gtk::GestureClick::builder().button(1).build();
         click.connect_pressed(glib::clone!(
             #[weak(rename_to = obj)]
             self,
@@ -1327,6 +1500,10 @@ impl DraftingWindow {
                 canvas.grab_focus();
                 let imp = obj.imp();
                 imp.is_mouse_pressed.set(true);
+                if imp.space_down.get() {
+                    imp.space_pan.set(true); // ให้ตอนปล่อยปุ่มรู้ว่าเป็นการเลื่อน
+                    return;
+                }
                 let pages = imp.pages.borrow();
 
                 if imp.current_mode.get() == DrawingMode::Move {
@@ -1547,6 +1724,9 @@ impl DraftingWindow {
                     .contains(gdk::ModifierType::SHIFT_MASK);
                 let imp = obj.imp();
                 imp.is_mouse_pressed.set(false);
+                if imp.space_pan.replace(false) {
+                    return;
+                }
 
                 if imp.current_mode.get() == DrawingMode::Move {
                     let pages = imp.pages.borrow();
@@ -1933,7 +2113,7 @@ impl DraftingWindow {
                         let _ = cr.stroke();
                     }
 
-                    RenderCommand::Dimension { .. } => {} // placeholder
+                    RenderCommand::Dimension { .. } | RenderCommand::Style { .. } => {} // placeholder
                     RenderCommand::Text { x, y, em_px, rotation, wrap_px, text, halign, valign, .. } => {
                         cr.set_source_rgba(1.0, 0.5, 0.0, 0.4);
                         crate::renderer::draw_text(cr, x, y, em_px, rotation, wrap_px, &text, halign, valign);
@@ -2434,6 +2614,237 @@ impl DraftingWindow {
             }
         }
         imp.building_layers.set(false);
+        self.sync_line_style_ui();
+    }
+
+    /// แถบเลือกความหนา/ชนิดเส้นของ layer ปัจจุบัน (ใส่ใต้รายการ layer)
+    fn build_line_style_ui(&self) {
+        let imp = self.imp();
+        let Some(add_box) = imp.btn_layer_add.parent() else { return };
+        let Some(panel) = add_box.parent().and_then(|p| p.downcast::<gtk::Box>().ok()) else {
+            return;
+        };
+
+        let labels: Vec<String> =
+            crate::linestyle::WEIGHTS_MM.iter().map(|w| format!("{:.2} mm", w)).collect();
+        let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+        let lw = gtk::DropDown::new(Some(gtk::StringList::new(&refs)), gtk::Expression::NONE);
+        lw.set_tooltip_text(Some("Line weight of the current layer"));
+        let lt = gtk::DropDown::new(
+            Some(gtk::StringList::new(&["Continuous"])),
+            gtk::Expression::NONE,
+        );
+        lt.set_tooltip_text(Some("Linetype of the current layer"));
+        lt.set_hexpand(true);
+
+        lw.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |d| {
+                if obj.imp().building_layers.get() {
+                    return;
+                }
+                if let Some(mm) = crate::linestyle::WEIGHTS_MM.get(d.selected() as usize) {
+                    obj.with_engine(|e| {
+                        let i = e.current_layer;
+                        e.set_layer_weight(i, *mm);
+                    });
+                }
+            }
+        ));
+        lt.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |d| {
+                if obj.imp().building_layers.get() {
+                    return;
+                }
+                let idx = d.selected() as usize;
+                obj.with_engine(|e| {
+                    let lt = if idx == 0 { None } else { e.linetype_choices().get(idx - 1).cloned() };
+                    let i = e.current_layer;
+                    e.set_layer_linetype(i, lt);
+                });
+            }
+        ));
+
+        let row = gtk::Box::builder().spacing(6).build();
+        row.append(&lw);
+        row.append(&lt);
+        panel.insert_child_after(&row, add_box.prev_sibling().as_ref());
+        *imp.lw_drop.borrow_mut() = Some(lw);
+        *imp.lt_drop.borrow_mut() = Some(lt);
+    }
+
+    /// แถบแก้ความหนา/ชนิดเส้นของวัตถุที่เลือก (ใต้แถบของ layer)
+    fn build_selection_style_ui(&self) {
+        let imp = self.imp();
+        let Some(layer_row) = imp.lw_drop.borrow().as_ref().and_then(|w| w.parent()) else { return };
+        let Some(panel) = layer_row.parent().and_then(|p| p.downcast::<gtk::Box>().ok()) else {
+            return;
+        };
+
+        let mut labels: Vec<String> = vec!["ByLayer".to_string()];
+        labels.extend(crate::linestyle::WEIGHTS_MM.iter().map(|w| format!("{:.2} mm", w)));
+        let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+        let lw = gtk::DropDown::new(Some(gtk::StringList::new(&refs)), gtk::Expression::NONE);
+        lw.set_tooltip_text(Some("Line weight of the selected objects"));
+        let lt = gtk::DropDown::new(
+            Some(gtk::StringList::new(&["ByLayer", "Continuous"])),
+            gtk::Expression::NONE,
+        );
+        lt.set_tooltip_text(Some("Linetype of the selected objects"));
+        lt.set_hexpand(true);
+
+        lw.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |d| {
+                if obj.imp().building_layers.get() {
+                    return;
+                }
+                let idx = d.selected();
+                if idx == gtk::INVALID_LIST_POSITION {
+                    return;
+                }
+                let w = if idx == 0 {
+                    None
+                } else {
+                    crate::linestyle::WEIGHTS_MM.get(idx as usize - 1).copied()
+                };
+                obj.with_engine(|e| e.set_selected_weight(w));
+            }
+        ));
+        lt.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |d| {
+                if obj.imp().building_layers.get() {
+                    return;
+                }
+                let idx = d.selected();
+                if idx == gtk::INVALID_LIST_POSITION {
+                    return;
+                }
+                let idx = idx as usize;
+                obj.with_engine(|e| {
+                    let v = match idx {
+                        0 => None,
+                        1 => Some(crate::linestyle::continuous()),
+                        n => e.linetype_choices().get(n - 2).cloned(),
+                    };
+                    e.set_selected_linetype(v);
+                });
+            }
+        ));
+
+        let label = gtk::Label::builder().xalign(0.0).css_classes(["caption"]).build();
+        let row = gtk::Box::builder().spacing(6).build();
+        row.append(&lw);
+        row.append(&lt);
+        let bx = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
+        bx.append(&label);
+        bx.append(&row);
+        bx.set_sensitive(false);
+        panel.insert_child_after(&bx, Some(&layer_row));
+
+        *imp.sel_box.borrow_mut() = Some(bx);
+        *imp.sel_label.borrow_mut() = Some(label);
+        *imp.sel_lw_drop.borrow_mut() = Some(lw);
+        *imp.sel_lt_drop.borrow_mut() = Some(lt);
+        self.sync_selection_ui();
+    }
+
+    /// อัปเดตแถบวัตถุที่เลือกเมื่อการเลือก/สไตล์เปลี่ยน (เรียกทุกเฟรม แต่ทำงานเฉพาะตอนเปลี่ยน)
+    fn sync_selection_ui(&self) {
+        let imp = self.imp();
+        let (Some(bx), Some(label), Some(lw), Some(lt)) = (
+            imp.sel_box.borrow().clone(),
+            imp.sel_label.borrow().clone(),
+            imp.sel_lw_drop.borrow().clone(),
+            imp.sel_lt_drop.borrow().clone(),
+        ) else {
+            return;
+        };
+        let Some(page) = imp.tab_view.selected_page() else { return };
+        let pages = imp.pages.borrow();
+        let Some(d_ref) = pages.get(&page) else { return };
+        let d = d_ref.borrow();
+
+        let key = (glib::prelude::ObjectType::as_ptr(&page) as usize, d.sel_rev);
+        if imp.sel_key.get() == key {
+            return;
+        }
+        imp.sel_key.set(key);
+
+        let s = d.selection_style();
+        let prev = imp.building_layers.replace(true); // กันไม่ให้การตั้งค่าตัวเลือกไปแก้วัตถุ
+        bx.set_sensitive(s.count > 0);
+        label.set_text(&if s.count > 0 {
+            format!("Selected objects ({})", s.count)
+        } else {
+            "Selected objects".to_string()
+        });
+
+        if s.count == 0 {
+            lw.set_selected(gtk::INVALID_LIST_POSITION);
+            lt.set_selected(gtk::INVALID_LIST_POSITION);
+        } else {
+            let wi = if s.weight_mixed {
+                gtk::INVALID_LIST_POSITION
+            } else {
+                s.weight.map_or(0, |w| crate::linestyle::nearest_weight_index(w) as u32 + 1)
+            };
+            lw.set_selected(wi);
+
+            let choices = d.linetype_choices();
+            let mut names: Vec<&str> = vec!["ByLayer", "Continuous"];
+            names.extend(choices.iter().map(|c| c.name.as_str()));
+            lt.set_model(Some(&gtk::StringList::new(&names)));
+            let li = if s.lt_mixed {
+                gtk::INVALID_LIST_POSITION
+            } else {
+                match &s.linetype {
+                    None => 0,
+                    Some(l) if l.pattern.is_empty() => 1,
+                    Some(l) => choices
+                        .iter()
+                        .position(|c| c.name.eq_ignore_ascii_case(&l.name))
+                        .map_or(gtk::INVALID_LIST_POSITION, |p| p as u32 + 2),
+                }
+            };
+            lt.set_selected(li);
+        }
+        imp.building_layers.set(prev);
+    }
+
+    /// ให้แถบความหนา/ชนิดเส้นตรงกับ layer ปัจจุบันของแท็บที่เปิดอยู่
+    fn sync_line_style_ui(&self) {
+        let imp = self.imp();
+        let (Some(lw), Some(lt)) = (imp.lw_drop.borrow().clone(), imp.lt_drop.borrow().clone())
+        else {
+            return;
+        };
+        let Some(page) = imp.tab_view.selected_page() else { return };
+        let pages = imp.pages.borrow();
+        let Some(d_ref) = pages.get(&page) else { return };
+        let d = d_ref.borrow();
+        let Some(l) = d.layers.get(d.current_layer) else { return };
+
+        let prev = imp.building_layers.replace(true); // กันไม่ให้การตั้งค่าตัวเลือกไปแก้ layer
+        lw.set_selected(crate::linestyle::nearest_weight_index(l.weight) as u32);
+
+        let choices = d.linetype_choices();
+        let mut names: Vec<&str> = vec!["Continuous"];
+        names.extend(choices.iter().map(|c| c.name.as_str()));
+        lt.set_model(Some(&gtk::StringList::new(&names)));
+        let sel = l
+            .linetype
+            .as_ref()
+            .and_then(|x| choices.iter().position(|c| c.name.eq_ignore_ascii_case(&x.name)))
+            .map_or(0, |p| p + 1);
+        lt.set_selected(sel as u32);
+        imp.building_layers.set(prev);
     }
 
     pub fn undo_action(&self) {
@@ -2620,7 +3031,7 @@ impl DraftingWindow {
     }
 
     pub fn show_open_dialog(&self) {
-        let (_, filters, dxf_filter) = dxf_filters();
+        let (_, filters, dxf_filter) = open_filters();
         let dialog = gtk::FileDialog::builder()
             .title("Open Drawing")
             .accept_label("_Open")
@@ -2655,10 +3066,13 @@ impl DraftingWindow {
 
             let p = path.clone();
             let result = gio::spawn_blocking(move || {
-                acadrust::DxfReader::from_file(&p)
-                    .and_then(|r| r.read())
-                    .map(|d| dxf_to_elements(&d))
-                    .map_err(|e| e.to_string())
+                let is_dwg = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dwg"));
+                let doc = if is_dwg {
+                    acadrust::DwgReader::from_file(&p).and_then(|mut r| r.read())
+                } else {
+                    acadrust::DxfReader::from_file(&p).and_then(|r| r.read())
+                };
+                doc.map(|d| dxf_to_elements(&d)).map_err(|e| e.to_string())
             })
             .await;
 
@@ -2687,10 +3101,11 @@ impl DraftingWindow {
                 let mut d = d_ref.borrow_mut();
                 d.layers = imported.layers;
                 d.current_layer = 0;
-                for (data, layer, color) in imported.items {
-                    d.push_imported(data, layer, color);
+                for (data, layer, color, style) in imported.items {
+                    d.push_imported(data, layer, color, style);
                 }
-                d.file_path = Some(path.clone());
+                let is_dwg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dwg"));
+                d.file_path = if is_dwg { None } else { Some(path.clone()) };
                 d.dirty = false;
                 d.skipped = skipped;
             }
@@ -3311,11 +3726,30 @@ fn dxf_filters() -> (gtk::FileFilter, gio::ListStore, gtk::FileFilter) {
     (f.clone(), list, f)
 }
 
+/// filter ของ dialog เปิดไฟล์: DXF และ DWG (เซฟยังเป็น DXF อย่างเดียว)
+fn open_filters() -> (gtk::FileFilter, gio::ListStore, gtk::FileFilter) {
+    let all = gtk::FileFilter::new();
+    all.set_name(Some("DXF and DWG drawings"));
+    for p in ["*.dxf", "*.DXF", "*.dwg", "*.DWG"] {
+        all.add_pattern(p);
+    }
+    let (dxf, _, _) = dxf_filters();
+    let dwg = gtk::FileFilter::new();
+    dwg.set_name(Some("DWG Drawing (*.dwg)"));
+    dwg.add_pattern("*.dwg");
+    dwg.add_pattern("*.DWG");
+    let list = gio::ListStore::new::<gtk::FileFilter>();
+    list.append(&all);
+    list.append(&dxf);
+    list.append(&dwg);
+    (all.clone(), list, all)
+}
+
 type Rgb = (u8, u8, u8);
 
 struct Imported {
     layers: Vec<crate::engine::Layer>,
-    items: Vec<(ElementData, usize, Option<Rgb>)>,
+    items: Vec<(ElementData, usize, Option<Rgb>, crate::linestyle::ElementStyle)>,
     skipped: usize,
 }
 
@@ -3323,6 +3757,8 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
     use crate::engine::Layer;
     use acadrust::EntityType;
     use std::collections::HashMap;
+    let lt_map = crate::linestyle::linetype_map(doc);
+    let global_lt_scale = if doc.header.linetype_scale > 0.0 { doc.header.linetype_scale } else { 1.0 };
     let mut layers: Vec<Layer> = vec![Layer::new("0", (255, 255, 255))];
     let mut index: HashMap<String, usize> = HashMap::from([("0".to_string(), 0)]);
     for l in doc.layers.iter() {
@@ -3333,10 +3769,12 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
                 layers[i].color = color;
                 layers[i].visible = visible;
                 layers[i].locked = locked;
+                (layers[i].weight, layers[i].linetype) = crate::linestyle::layer_style(l, &lt_map);
             }
             None => {
                 index.insert(l.name.to_lowercase(), layers.len());
-                layers.push(Layer { name: l.name.clone(), color, visible, locked });
+                let (weight, linetype) = crate::linestyle::layer_style(l, &lt_map);
+                layers.push(Layer { name: l.name.clone(), color, visible, locked, weight, linetype });
             }
         }
     }
@@ -3355,6 +3793,7 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
         });
         // ByLayer / ByBlock → None (ใช้สีของ layer), Index / Rgb → สีของวัตถุเอง
         let col = c.color.rgb();
+        let style = crate::linestyle::entity_style(c, &lt_map, global_lt_scale);
 
         let mut out: Vec<ElementData> = Vec::new();
         match e {
@@ -3427,7 +3866,7 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
             _ => skipped += 1,
         }
         for data in out {
-            items.push((data, li, col));
+            items.push((data, li, col, style.clone()));
         }
     }
     Imported { layers, items, skipped }
@@ -3450,17 +3889,29 @@ fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> 
 
     let mut doc = CadDocument::new();
 
+    crate::linestyle::ensure_linetypes(
+        &mut doc,
+        data.layers
+            .iter()
+            .filter_map(|l| l.linetype.as_ref())
+            .chain(data.history.iter().filter_map(|e| e.style.linetype.as_ref())),
+    );
+
     // ตาราง layer ("0" มีอยู่แล้วในไฟล์ใหม่ → แก้ของเดิม ไม่เพิ่มซ้ำ)
     for l in &data.layers {
         if let Some(ex) = doc.layers.get_mut(&l.name) {
             ex.color = to_ac_color(l.color);
             ex.flags.off = !l.visible;
             ex.flags.locked = l.locked;
+            ex.line_weight = crate::linestyle::to_ac_weight(l.weight);
+            ex.line_type = crate::linestyle::ac_linetype_name(&l.linetype);
         } else {
             let mut nl = AcLayer::new(l.name.clone());
             nl.color = to_ac_color(l.color);
             nl.flags.off = !l.visible;
             nl.flags.locked = l.locked;
+            nl.line_weight = crate::linestyle::to_ac_weight(l.weight);
+            nl.line_type = crate::linestyle::ac_linetype_name(&l.linetype);
             doc.layers.add(nl)?;
         }
     }
@@ -3468,6 +3919,7 @@ fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> 
     for el in data.get_all_elements() {
         let layer_name = data.layers[el.layer].name.clone();
         let color = el.color.map(to_ac_color);
+        let style = el.style.clone();
         let mut push = |mut e: EntityType| -> Result<(), String> {
             {
                 let c = e.common_mut();
@@ -3475,6 +3927,13 @@ fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> 
                 if let Some(col) = &color {
                     c.color = col.clone();
                 }
+                if let Some(w) = style.weight {
+                    c.line_weight = crate::linestyle::to_ac_weight(w);
+                }
+                if let Some(lt) = &style.linetype {
+                    c.linetype = lt.name.clone();
+                }
+                c.linetype_scale = style.lt_scale;
             }
             doc.add_entity(e).map(|_| ()).map_err(|e| e.to_string())
         };

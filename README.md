@@ -23,12 +23,15 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Undo / Redo
 - Command bar interface
 - Auto-pan at window edges
+- Pan with the middle mouse button, `Space` + drag, or a two-finger scroll on a touchpad; zoom with the wheel, `Ctrl` + scroll or a pinch
 - Text and MText display (read, move, copy and save)
+- Open DXF and DWG files (DWG is read-only; Save writes DXF)
 - Block inserts and dimensions from other CAD programs
+- Line weight and linetype, shown as stored in the file and editable per layer and per object
 
 ## DXF Support
 
-DXF files are read with [acadrust](https://crates.io/crates/acadrust) (newer DXF versions supported) and written with the [dxf](https://crates.io/crates/dxf) crate.
+DXF and DWG files are read, and DXF files are written, with [acadrust](https://crates.io/crates/acadrust) (newer DXF versions supported).
 
 | Entity | Open | Save |
 |---|---|---|
@@ -38,9 +41,11 @@ DXF files are read with [acadrust](https://crates.io/crates/acadrust) (newer DXF
 | LWPolyline | Yes (segments with a bulge are converted to arcs) | Yes |
 | Spline | Yes (flattened to a polyline) | Saved as a polyline |
 | Ellipse | Yes (flattened to a polyline) | Saved as a polyline |
-| Linear dimension | No | Saved as three plain lines |
-| Layers | Read/Write, true color, on/off and lock state | Read/Write, true color and on/off state |
-| Entity color | ACI and true color | True color is saved as the nearest ACI color |
+| Linear dimension (drawn in Drafting) | - | Saved as three plain lines |
+| Layers | Yes (true color, on/off, lock, line weight, linetype) | Yes |
+| Entity color | ACI and true color | Yes |
+| Line weight / linetype | Yes (per layer and per object, ByLayer / ByBlock, LTSCALE) | Yes |
+| Solid / Hatch | Yes (as filled areas) | SOLID or HATCH |
 | Text / MText | Yes (plain text only; formatting is dropped) | Saved as TEXT, or MTEXT when multi-line |
 | Block insert (INSERT) | Yes (exploded into plain objects) | Saved as plain objects |
 | Dimension (any type) | Yes (drawn from the stored geometry, as plain lines and text) | - |
@@ -88,8 +93,8 @@ See the [installation guide](docs/Steps_for_installing_Drafting_on_the_Windows_d
 ### Requirements
 
 - Rust (stable)
-- GTK4 ≥ 4.12
-- libadwaita ≥ 1.4
+- GTK4 ≥ 4.20
+- libadwaita ≥ 1.6
 - Meson + Ninja
 
 ### Build
@@ -143,7 +148,7 @@ Type commands in the command bar at the bottom:
 | `z` | Zoom in at cursor |
 | `u`, `undo` | Undo |
 | `r`, `redo` | Redo |
-| `o`, `open` | Open a DXF file |
+| `o`, `open` | Open a DXF or DWG file |
 | `save` | Save |
 | `saveas` | Save As |
 
@@ -158,10 +163,22 @@ Type commands in the command bar at the bottom:
 Open the panel with the layers button in the right dock (or type `la`).
 
 - **Eye**: show or hide a layer. Hidden layers can't be picked or selected, and they are ignored by object snap and by Trim/Extend.
-- **Lock**: locked layers stay visible and snappable (and still act as cutting edges), but their objects can't be selected or edited. The lock state is not saved to DXF.
+- **Lock**: locked layers stay visible and snappable (and still act as cutting edges), but their objects can't be selected or edited. The lock state is saved to DXF.
 - **Click a name** to make it the current layer. New objects are created on it.
 - Layers, their colors and per-object colors are read from DXF files and written back when you save.
 - Right-click a layer name to rename or delete it (its objects move to layer 0). Layer add/rename/colour/delete can be undone with Ctrl+Z.
+- Under the list, pick the line weight and linetype of the current layer.
+- The **Selected objects** row sets them for the selected objects. `ByLayer` means follow the layer.
+- Line weight is drawn as a fixed number of pixels (0.25 mm = 2 px) and does not grow with zoom. Patterns that get too fine to see are drawn solid.
+
+## Limitations
+
+- MText formatting (bold, italic, colors, mixed sizes) is dropped; only plain text is kept.
+- Block inserts are exploded when a file is opened, so they are saved as plain objects.
+- Dimensions from a file are plain lines and text, not editable dimensions.
+- Block attributes (ATTRIB) are not shown.
+- DWG files can be opened but not saved; use Save As to write a DXF.
+- Linetypes that contain text or shapes are drawn as plain dashes.
 
 ## License
 

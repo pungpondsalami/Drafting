@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 gtk = { version = "0.11", package = "gtk4", features = ["gnome_49"] }
-dxf = "0.6.0"
 acadrust = "0.6"
 pangocairo = "0.22"
 

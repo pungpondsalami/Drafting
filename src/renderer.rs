@@ -8,22 +8,25 @@ pub trait Renderer {
 
 pub struct CairoRenderer<'a> {
     cr: &'a gtk::cairo::Context,
+    lw: f64,
+    dash: Vec<f64>,
 }
 
 impl<'a> CairoRenderer<'a> {
     pub fn new(cr: &'a gtk::cairo::Context) -> Self {
-        Self { cr }
+        Self { cr, lw: 2.0, dash: Vec::new() }
     }
 
     /// เลือกสีเส้น: ถูกเลือก = แดงหนา, ปกติ = สีของวัตถุ/layer
     fn pen(&self, is_selected: bool, color: (f64, f64, f64)) {
         if is_selected {
             self.cr.set_source_rgb(1.0, 0.0, 0.0);
-            self.cr.set_line_width(3.0);
+            self.cr.set_line_width((self.lw + 1.0).max(3.0));
         } else {
             self.cr.set_source_rgb(color.0, color.1, color.2);
-            self.cr.set_line_width(2.0);
+            self.cr.set_line_width(self.lw);
         }
+        self.cr.set_dash(&self.dash, 0.0);
     }
 }
 
@@ -156,13 +159,22 @@ impl Renderer for CairoRenderer<'_> {
                             cr.set_line_width(3.0);
                             let _ = cr.stroke();
                         } else {
-                            let _ = cr.fill();
+                            // เติมแล้ววาดขอบบาง ๆ ทับ ปิดรอยต่อระหว่างสามเหลี่ยมที่อยู่ติดกัน
+                            let _ = cr.fill_preserve();
+                            cr.set_dash(&[], 0.0);
+                            cr.set_line_width(0.6);
+                            let _ = cr.stroke();
                         }
                         cr.set_fill_rule(gtk::cairo::FillRule::Winding);
                     } else {
                         self.pen(is_selected, color);
                         let _ = cr.stroke();
                     }
+                }
+
+                RenderCommand::Style { lw, dash } => {
+                    self.lw = lw;
+                    self.dash = dash;
                 }
 
                 RenderCommand::Text {
@@ -182,6 +194,7 @@ impl Renderer for CairoRenderer<'_> {
                     ext1_x1, ext1_y1, ext1_x2, ext1_y2,
                     ext2_x1, ext2_y1, ext2_x2, ext2_y2,
                 } => {
+                    cr.set_dash(&[], 0.0);
                     if is_selected {
                         cr.set_source_rgb(1.0, 0.35, 0.35);
                         cr.set_line_width(2.5);

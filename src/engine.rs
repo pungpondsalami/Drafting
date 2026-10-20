@@ -150,6 +150,7 @@ pub struct DrawingElement {
     pub is_selected: bool,
     pub layer: usize,
     pub color: Option<Rgb>,
+    pub style: crate::linestyle::ElementStyle,
     pub data: ElementData,
 }
 
@@ -252,11 +253,22 @@ pub struct Layer {
     pub color: Rgb,
     pub visible: bool,
     pub locked: bool,
+    /// ความหนาเส้นเริ่มต้นของ layer (มม.)
+    pub weight: f64,
+    /// None = เส้นทึบ
+    pub linetype: Option<crate::linestyle::Lt>,
 }
 
 impl Layer {
     pub fn new(name: &str, color: Rgb) -> Self {
-        Self { name: name.to_string(), color, visible: true, locked: false }
+        Self {
+            name: name.to_string(),
+            color,
+            visible: true,
+            locked: false,
+            weight: crate::linestyle::DEFAULT_WEIGHT,
+            linetype: None,
+        }
     }
 }
 
@@ -319,6 +331,8 @@ pub enum RenderCommand {
         is_selected: bool,
         color: (f64, f64, f64),
     },
+    /// ตั้งความหนา (px) และ dash (px, ว่าง = ทึบ) ให้คำสั่งวาดเส้นที่ตามมา
+    Style { lw: f64, dash: Vec<f64> },
     /// พิกัดและขนาดเป็นพิกเซลหน้าจอแล้ว; em_px = ขนาด em ของฟอนต์, wrap_px > 0 = ตัดบรรทัด
     Text {
         x: f64,
@@ -547,6 +561,8 @@ pub struct Engine {
     pub layers: Vec<Layer>,
     pub current_layer: usize,
     pub skipped: usize,
+    /// เพิ่มทุกครั้งที่การเลือก/สไตล์ของวัตถุอาจเปลี่ยน (UI ใช้ดูว่าต้องอัปเดตไหม)
+    pub sel_rev: u64,
 }
 
 impl Engine {
@@ -569,6 +585,7 @@ impl Engine {
             layers: vec![Layer::new("0", (255, 255, 255))],
             current_layer: 0,
             skipped: 0,
+            sel_rev: 0,
         }
     }
 
@@ -610,6 +627,7 @@ impl Engine {
     }
 
     pub fn select_at(&mut self, world_x: f64, world_y: f64, add_to_selection: bool) {
+        self.sel_rev += 1;
         let top = self.pick_at(world_x, world_y);
 
         if !add_to_selection {
@@ -648,10 +666,11 @@ impl Engine {
     pub fn offset_apply(&mut self, id: u64, side: Point, dist: f64) -> Result<(), &'static str> {
         let i = self.index_of(id).ok_or("Object no longer exists")?;
         let data = offset_data(&self.history[i].data, side, dist)?;
-        let (layer, color) = (self.history[i].layer, self.history[i].color);
+        let (layer, color, style) =
+            (self.history[i].layer, self.history[i].color, self.history[i].style.clone());
         self.checkpoint();
         let id = self.get_next_id();
-        self.add_element(DrawingElement { id, is_selected: false, layer, color, data });
+        self.add_element(DrawingElement { id, is_selected: false, layer, color, style, data });
         Ok(())
     }
 
@@ -697,12 +716,20 @@ impl Engine {
         let i = self.index_of(id).ok_or("Object no longer exists")?;
         let cutters = self.trim_cutters(id, i);
         let (pieces, _) = trim_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters)?;
-        let (layer, color) = (self.history[i].layer, self.history[i].color);
+        let (layer, color, style) =
+            (self.history[i].layer, self.history[i].color, self.history[i].style.clone());
         self.checkpoint();
         self.history.remove(i);
         for data in pieces {
             let nid = self.get_next_id();
-            self.history.push(DrawingElement { id: nid, is_selected: false, layer, color, data });
+            self.history.push(DrawingElement {
+                id: nid,
+                is_selected: false,
+                layer,
+                color,
+                style: style.clone(),
+                data,
+            });
         }
         self.rebuild_index();
         Ok(())
@@ -756,6 +783,7 @@ impl Engine {
         crossing: bool,
         add_to_selection: bool,
     ) {
+        self.sel_rev += 1;
         let sel_box = BoundingBox::from_points(x1, y1, x2, y2);
 
         if !add_to_selection {
@@ -790,6 +818,7 @@ impl Engine {
     }
 
     pub fn deselect_all(&mut self) {
+        self.sel_rev += 1;
         for el in &mut self.history {
             el.is_selected = false;
         }
@@ -821,12 +850,14 @@ impl Engine {
         self.history = s.history;
         self.layers = s.layers;
         self.current_layer = s.current_layer;
+        self.sel_rev += 1;
         self.hovered_id = None;
         self.rebuild_index();
     }
 
     pub fn checkpoint(&mut self) {
         self.dirty = true;
+        self.sel_rev += 1;
         let snap = self.snapshot();
         self.undo_stack.push(snap);
         if self.undo_stack.len() > Self::MAX_UNDO {
@@ -1092,13 +1123,26 @@ impl Engine {
     pub fn push_new(&mut self, data: ElementData) -> u64 {
         let id = self.get_next_id();
         let layer = self.current_layer;
-        self.add_element(DrawingElement { id, is_selected: false, layer, color: None, data });
+        self.add_element(DrawingElement {
+            id,
+            is_selected: false,
+            layer,
+            color: None,
+            style: Default::default(),
+            data,
+        });
         id
     }
 
-    pub fn push_imported(&mut self, data: ElementData, layer: usize, color: Option<Rgb>) {
+    pub fn push_imported(
+        &mut self,
+        data: ElementData,
+        layer: usize,
+        color: Option<Rgb>,
+        style: crate::linestyle::ElementStyle,
+    ) {
         let id = self.get_next_id();
-        self.add_element(DrawingElement { id, is_selected: false, layer, color, data });
+        self.add_element(DrawingElement { id, is_selected: false, layer, color, style, data });
     }
 
     fn layer_visible(&self, i: usize) -> bool {
@@ -1115,6 +1159,12 @@ impl Engine {
         (c.0 as f64 / 255.0, c.1 as f64 / 255.0, c.2 as f64 / 255.0)
     }
 
+    /// (ความหนา px, dash px) ที่ใช้วาดวัตถุนี้ ณ ระดับซูมปัจจุบัน
+    fn pen_style(&self, el: &DrawingElement) -> (f64, Vec<f64>) {
+        let l = &self.layers[el.layer];
+        crate::linestyle::resolve(l.weight, &l.linetype, &el.style, self.camera.scale)
+    }
+
     pub fn set_current_layer(&mut self, i: usize) {
         if i < self.layers.len() {
             self.current_layer = i;
@@ -1122,6 +1172,7 @@ impl Engine {
     }
 
     fn drop_selection_on_layer(&mut self, layer: usize) {
+        self.sel_rev += 1;
         for e in self.history.iter_mut().filter(|e| e.layer == layer) {
             e.is_selected = false;
         }
@@ -1222,6 +1273,78 @@ impl Engine {
         }
         self.checkpoint();
         self.layers[i].color = c;
+    }
+
+    pub fn set_layer_weight(&mut self, i: usize, mm: f64) {
+        if self.layers.get(i).map_or(true, |l| (l.weight - mm).abs() < 1e-9) {
+            return;
+        }
+        self.checkpoint();
+        self.layers[i].weight = mm;
+    }
+
+    pub fn set_layer_linetype(&mut self, i: usize, lt: Option<crate::linestyle::Lt>) {
+        if self.layers.get(i).map_or(true, |l| l.linetype == lt) {
+            return;
+        }
+        self.checkpoint();
+        self.layers[i].linetype = lt;
+    }
+
+    /// ชนิดเส้นที่เลือกได้ (ไม่รวมเส้นทึบ): ของสำเร็จรูป + ที่มากับไฟล์
+    pub fn linetype_choices(&self) -> Vec<crate::linestyle::Lt> {
+        let mut out = crate::linestyle::presets();
+        let mut seen: std::collections::HashSet<String> =
+            out.iter().map(|l| l.name.to_lowercase()).collect();
+        let from_layers = self.layers.iter().filter_map(|l| l.linetype.as_ref());
+        let from_elems = self.history.iter().filter_map(|e| e.style.linetype.as_ref());
+        for lt in from_layers.chain(from_elems) {
+            if !lt.pattern.is_empty() && seen.insert(lt.name.to_lowercase()) {
+                out.push(lt.clone());
+            }
+        }
+        out
+    }
+
+    pub fn selection_style(&self) -> crate::linestyle::SelStyle {
+        let mut s = crate::linestyle::SelStyle::default();
+        for e in self.history.iter().filter(|e| e.is_selected) {
+            if s.count == 0 {
+                s.weight = e.style.weight;
+                s.linetype = e.style.linetype.clone();
+            } else {
+                if s.weight != e.style.weight {
+                    s.weight_mixed = true;
+                }
+                if s.linetype != e.style.linetype {
+                    s.lt_mixed = true;
+                }
+            }
+            s.count += 1;
+        }
+        s
+    }
+
+    /// None = ตาม layer
+    pub fn set_selected_weight(&mut self, w: Option<f64>) {
+        if !self.history.iter().any(|e| e.is_selected && e.style.weight != w) {
+            return;
+        }
+        self.checkpoint();
+        for e in self.history.iter_mut().filter(|e| e.is_selected) {
+            e.style.weight = w;
+        }
+    }
+
+    /// None = ตาม layer, Some(continuous()) = บังคับเส้นทึบ
+    pub fn set_selected_linetype(&mut self, lt: Option<crate::linestyle::Lt>) {
+        if !self.history.iter().any(|e| e.is_selected && e.style.linetype != lt) {
+            return;
+        }
+        self.checkpoint();
+        for e in self.history.iter_mut().filter(|e| e.is_selected) {
+            e.style.linetype = lt.clone();
+        }
     }
 
     pub fn move_selected_to_layer(&mut self) -> usize {
@@ -1524,6 +1647,7 @@ impl Engine {
         let viewport_bounds = BoundingBox::from_points(p1.0, p1.1, p2.0, p2.1);
         let visible_elements = self.get_visible_elements(viewport_bounds);
         let mut commands = Vec::with_capacity(visible_elements.len());
+        let mut last_style: (f64, Vec<f64>) = (2.0, Vec::new()); // เท่าค่าเริ่มต้นของตัววาด
         for el in visible_elements {
             let mut draw_scale = 1.0f64;
             if self.apply_anim.is_playing {
@@ -1549,6 +1673,13 @@ impl Engine {
             }
 
             let col = self.pen_color(el);
+            if !matches!(el.data, ElementData::Text { .. } | ElementData::Dimension { .. }) {
+                let st = self.pen_style(el);
+                if st != last_style {
+                    commands.push(RenderCommand::Style { lw: st.0, dash: st.1.clone() });
+                    last_style = st;
+                }
+            }
 
             match &el.data {
                 // --- Line ---

@@ -25,6 +25,7 @@ mod engine;
 mod spatial;
 mod renderer;
 mod blocks;
+mod linestyle;
 mod text;
 
 use self::application::DraftingApplication;
@@ -64,15 +65,6 @@ fn main() -> glib::ExitCode {
     // exits. Upon return, we have our exit code to return to the shell. (This
     // is the code you see when you do `echo $?` after running a command in a
     // terminal.
-    {
-        let mut test_engine = crate::engine::Engine::new();
-        test_engine.camera.target_scale = 2.0;
-        println!("--- Engine Logic Check ---");
-        test_engine.step(100_000);
-        println!("Scale after 0.1s: {:.4}", test_engine.camera.scale);
-        println!("--- Logic OK, Launching UI... ---\n");
-    }
-
     let app = DraftingApplication::new("com.pungpondsalami.drafting", &gio::ApplicationFlags::empty());
     app.run()
 }

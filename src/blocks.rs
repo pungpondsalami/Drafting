@@ -1,3 +1,6 @@
+// blocks.rs - แตกบล็อก (INSERT) และ DIMENSION ให้เป็นวัตถุธรรมดาตอนเปิดไฟล์
+//
+// การคำนวณ transform (หมุน/สเกล/กระจก/MINSERT/สืบทอด layer และสีของ INSERT)
 // ใช้ของ acadrust ส่วนไฟล์นี้ดูแลเรื่องที่มันทำให้ไม่ตรงกับโครงสร้างของเรา
 
 use crate::engine::{ElementData, Point};
@@ -24,7 +27,14 @@ pub fn explode_insert(doc: &CadDocument, ins: &Insert) -> Option<Vec<EntityType>
             e.as_entity_mut().apply_transform(&t);
         }
     }
-    Some(ins.explode(&ents))
+    let mut out = ins.explode(&ents);
+    // acadrust สืบทอด layer/สี/ความหนาให้แล้ว แต่ linetype ByBlock ยังไม่ทำ
+    for e in out.iter_mut() {
+        if e.common().linetype.eq_ignore_ascii_case("byblock") {
+            e.common_mut().linetype = ins.common.linetype.clone();
+        }
+    }
+    Some(out)
 }
 
 /// เส้นมิติ/ลูกศร/ตัวเลขของ DIMENSION อยู่ในบล็อกนิรนาม (*D1, ...) พิกัดโลกอยู่แล้ว
