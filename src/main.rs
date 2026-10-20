@@ -24,6 +24,7 @@ mod window;
 mod engine;
 mod spatial;
 mod renderer;
+mod blocks;
 mod text;
 
 use self::application::DraftingApplication;

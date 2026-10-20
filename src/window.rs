@@ -3344,7 +3344,9 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
     let mut items = Vec::new();
     let mut skipped = 0usize;
 
-    for e in doc.model_space_entities() {
+    // INSERT (ซ้อนได้) และ DIMENSION ถูกแตกเป็นวัตถุธรรมดาก่อน
+    let flat = crate::blocks::flatten_model_space(doc);
+    for e in &flat {
         let c = e.common();
         let lname = if c.layer.is_empty() { "0" } else { c.layer.as_str() };
         let li = *index.entry(lname.to_lowercase()).or_insert_with(|| {
@@ -3360,23 +3362,8 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
                 start: Point { x: l.start.x, y: l.start.y },
                 end: Point { x: l.end.x, y: l.end.y },
             }),
-            EntityType::Circle(c) => out.push(ElementData::Circle {
-                center: Point { x: c.center.x, y: c.center.y },
-                radius: c.radius,
-            }),
-            EntityType::Arc(a) => {
-                let s = a.start_angle;
-                let mut en = a.end_angle;
-                while en <= s {
-                    en += std::f64::consts::TAU;
-                }
-                out.push(ElementData::Arc {
-                    center: Point { x: a.center.x, y: a.center.y },
-                    radius: a.radius,
-                    start_angle: s,
-                    end_angle: en,
-                });
-            }
+            EntityType::Circle(c) => out.push(crate::blocks::circle_element(c)),
+            EntityType::Arc(a) => out.push(crate::blocks::arc_element(a)),
             EntityType::LwPolyline(p) if p.vertices.len() >= 2 => {
                 let pts: Vec<Point> = p.vertices.iter()
                     .map(|v| Point { x: v.location.x, y: v.location.y })
@@ -3407,6 +3394,9 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
                     Some(points) => out.push(ElementData::Polyline { points, closed: false }),
                     None => skipped += 1,
                 }
+            }
+            EntityType::Ellipse(el) if crate::blocks::ellipse_round(el).is_some() => {
+                out.extend(crate::blocks::ellipse_round(el));
             }
             EntityType::Ellipse(el) => {
                 let (points, full) = ellipse_points(
