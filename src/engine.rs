@@ -885,6 +885,7 @@ impl Engine {
     }
 
     pub fn move_selected(&mut self, dx: f64, dy: f64) {
+        self.sel_rev += 1;
         for el in self.history.iter_mut().filter(|e| e.is_selected) {
             el.data.translate(dx, dy);
         }
@@ -1370,13 +1371,39 @@ impl Engine {
 
     pub fn get_visible_elements(&self, viewport_bounds: BoundingBox) -> Vec<&DrawingElement> {
         let mut hits = Vec::new();
-        self.spatial_index.query(&viewport_bounds, &mut hits);
+        // เล็กกว่า 0.5 พิกเซลทั้งสองแกน = มองไม่เห็น ไม่ต้องสร้างคำสั่งวาด
+        let min_extent = 0.5 / self.camera.scale.max(1e-9);
+        self.spatial_index.query_min(&viewport_bounds, min_extent, &mut hits);
         let mut ids: Vec<u64> = hits.into_iter().copied().collect();
         ids.sort_unstable();
         ids.into_iter()
             .filter_map(|id| self.index_of(id).map(|i| &self.history[i]))
             .filter(|e| self.layers[e.layer].visible)
             .collect()
+    }
+
+    /// เลขที่เปลี่ยนเมื่อสิ่งที่มีผลต่อคำสั่งวาดเปลี่ยน (ไม่รวมกล้อง) ใช้ข้ามการสร้างคำสั่งวาดซ้ำ
+    pub fn scene_rev(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.sel_rev.hash(&mut h);
+        self.history.len().hash(&mut h);
+        self.id_counter.hash(&mut h);
+        if self.apply_anim.is_playing {
+            self.apply_anim.timer.to_bits().hash(&mut h);
+        }
+        for l in &self.layers {
+            l.visible.hash(&mut h);
+            l.color.hash(&mut h);
+            l.weight.to_bits().hash(&mut h);
+            if let Some(t) = &l.linetype {
+                t.name.hash(&mut h);
+                for p in &t.pattern {
+                    p.to_bits().hash(&mut h);
+                }
+            }
+        }
+        h.finish()
     }
 
     pub fn get_all_elements(&self) -> Vec<&DrawingElement> {

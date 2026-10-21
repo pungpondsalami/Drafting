@@ -185,6 +185,38 @@ impl<T: Clone> SpatialIndex<T> {
         }
     }
 
+    /// เหมือน query แต่ข้ามโหนดที่เล็กกว่า min_extent ทั้งสองแกน (เล็กเกินกว่าจะเห็นบนจอ)
+    pub fn query_min<'a>(&'a self, area: &BoundingBox, min_extent: f64, results: &mut Vec<&'a T>) {
+        if let Some(ref node) = self.root {
+            self.query_min_recursive(node, area, min_extent, results);
+        }
+    }
+
+    fn query_min_recursive<'a>(
+        &'a self,
+        node: &'a RTreeNode<T>,
+        area: &BoundingBox,
+        min_extent: f64,
+        results: &mut Vec<&'a T>,
+    ) {
+        let b = node.bounds();
+        if !b.intersects(area) {
+            return;
+        }
+        // ลูกทุกตัวอยู่ในกรอบของโหนด ถ้ากรอบเล็กเกินเห็น ลูกก็เล็กเกินเห็นเช่นกัน
+        if b.max_x - b.min_x < min_extent && b.max_y - b.min_y < min_extent {
+            return;
+        }
+        match node {
+            RTreeNode::Leaf { data, .. } => results.push(data),
+            RTreeNode::Internal { children, .. } => {
+                for child in children {
+                    self.query_min_recursive(child, area, min_extent, results);
+                }
+            }
+        }
+    }
+
     pub fn query_point<'a>(&'a self, x: f64, y: f64, results: &mut Vec<&'a T>) {
         if let Some(ref node) = self.root {
             self.query_point_recursive(node, x, y, results);

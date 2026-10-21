@@ -1863,6 +1863,7 @@ impl DraftingWindow {
                     let (mx, my) = scene_margin(w, h);
                     let s2w = |x: f64, y: f64| ((x - toff.0) / ts, -(y - toff.1) / ts);
                     let commands = dm.render_commands_at_target(-mx, -my, w + mx, h + my);
+                    let rev = dm.scene_rev();
                     let (sx, sy) = cr.target().device_scale();
                     spawn_scene_build(
                         state,
@@ -1873,6 +1874,7 @@ impl DraftingWindow {
                             sx,
                             sy,
                             key: want_key,
+                            rev,
                             tl: s2w(-mx, -my),
                             br: s2w(w + mx, h + my),
                             commands,
@@ -1907,13 +1909,14 @@ impl DraftingWindow {
         );
 
         if !cam_moving(cam) {
-            let cmds = d.get_render_commands_in(-mx, -my, w + mx, h + my);
+            let rev = d.scene_rev();
             let fresh = state
                 .borrow()
                 .cache
                 .as_ref()
-                .is_some_and(|c| c.key == cur_key && c.cmds == cmds);
+                .is_some_and(|c| c.key == cur_key && c.rev == rev);
             if !fresh {
+                let cmds = d.get_render_commands_in(-mx, -my, w + mx, h + my);
                 let (sx, sy) = cr.target().device_scale();
                 let job = SceneJob {
                     w,
@@ -1921,6 +1924,7 @@ impl DraftingWindow {
                     sx,
                     sy,
                     key: cur_key,
+                    rev,
                     tl: cam.screen_to_world(-mx, -my),
                     br: cam.screen_to_world(w + mx, h + my),
                     commands: cmds,
@@ -3220,6 +3224,7 @@ type SceneKey = (i32, i32, u64, u64, u64);
 #[derive(Debug)]
 struct SceneCache {
     key: SceneKey,
+    rev: u64,
     world_tl: (f64, f64),
     world_br: (f64, f64),
     cmds: Vec<RenderCommand>,
@@ -3240,6 +3245,7 @@ struct SceneJob {
     sx: f64,
     sy: f64,
     key: SceneKey,
+    rev: u64,
     tl: (f64, f64),
     br: (f64, f64),
     commands: Vec<RenderCommand>,
@@ -3247,6 +3253,7 @@ struct SceneJob {
 
 struct SceneDone {
     key: SceneKey,
+    rev: u64,
     tl: (f64, f64),
     br: (f64, f64),
     commands: Vec<RenderCommand>,
@@ -3281,6 +3288,7 @@ fn render_scene_job(job: SceneJob) -> Option<SceneDone> {
     let data = surface.data().ok()?.to_vec();
     Some(SceneDone {
         key: job.key,
+        rev: job.rev,
         tl: job.tl,
         br: job.br,
         commands: job.commands,
@@ -3301,6 +3309,7 @@ fn install_scene(state: &mut SceneState, done: SceneDone) {
         surface.set_device_scale(done.sx, done.sy);
         state.cache = Some(SceneCache {
             key: done.key,
+            rev: done.rev,
             world_tl: done.tl,
             world_br: done.br,
             cmds: done.commands,
