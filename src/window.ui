@@ -10,8 +10,8 @@
   </menu>
 
   <template class="DraftingWindow" parent="AdwApplicationWindow">
-    <property name="default-width">1000</property>
-    <property name="default-height">700</property>
+    <property name="default-width">1200</property>
+    <property name="default-height">800</property>
     <property name="title">Drafting</property>
 
     <property name="content">
