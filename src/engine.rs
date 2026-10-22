@@ -523,22 +523,19 @@ impl Camera {
         let lerp_factor = (dt * 10.0).min(1.0);
         let mut changed = false;
 
+        // scale กับ offset ต้องเดินพร้อมกันและหยุดพร้อมกันเสมอ
+        // (ซูมลึก offset มีค่าเป็นล้านพิกเซล ถ้า scale หยุดก่อน offset จะไถลต่อจนภาพส่าย)
         let scale_ratio = (self.scale / self.target_scale).ln().abs();
-        if scale_ratio > 0.00001 {
-            self.scale += (self.target_scale - self.scale) * lerp_factor;
-            changed = true;
-        } else {
-            self.scale = self.target_scale;
-        }
-
         let dx = self.target_offset.0 - self.offset.0;
         let dy = self.target_offset.1 - self.offset.1;
 
-        if dx.abs() > 0.01 || dy.abs() > 0.01 {
+        if scale_ratio > 0.00001 || dx.abs() > 0.01 || dy.abs() > 0.01 {
+            self.scale += (self.target_scale - self.scale) * lerp_factor;
             self.offset.0 += dx * lerp_factor;
             self.offset.1 += dy * lerp_factor;
             changed = true;
         } else {
+            self.scale = self.target_scale;
             self.offset = self.target_offset;
         }
 
