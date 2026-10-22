@@ -20,6 +20,7 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Rectangular array with preview
 - Multi-select with window/crossing selection (AutoCAD-style)
 - Move tool with snap
+- Mirror: select objects, then `MI` or the Mirror button and click two points; hold `Shift` on the second click to delete the originals
 - Undo / Redo
 - Command bar interface
 - Auto-pan at window edges
@@ -64,9 +65,9 @@ flatpak install com.pungpondsalami.drafting
 
 ### Windows (MSIX) — Developer Preview
 
-Windows builds are available as MSIX packages via [GitHub Actions](https://github.com/pungpondsalami/Drafting/actions).
+Windows builds are published as MSIX packages on the [Releases page](https://github.com/pungpondsalami/Drafting/releases).
 
-Download the `drafting-windows` artifact and unzip it. It contains the package, the signing certificate and an installer script in one folder:
+Download these four files into the same folder (check them against `SHA256SUMS.txt` if you like):
 
 ```
 drafting.msix
@@ -78,6 +79,8 @@ install.ps1
 Double-click `install.bat` (it asks for administrator rights). The script trusts the certificate and installs the package.
 
 The certificate is the same for every build, so after the first install you can simply double-click a newer `drafting.msix` to update.
+
+> **Browser or SmartScreen warning?** The package is signed with a self-signed certificate, so Chrome or Windows SmartScreen may warn about the download. That is expected for an unsigned-by-a-public-CA developer preview. Verify the SHA-256 in `SHA256SUMS.txt` and keep the file; please don't turn off browser protection globally.
 
 If you prefer to do it manually, from an Administrator PowerShell:
 

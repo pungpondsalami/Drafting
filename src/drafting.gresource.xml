@@ -6,6 +6,7 @@
     <file>icons/draw-line-symbolic.svg</file>
     <file>icons/draw-circle-symbolic.svg</file>
     <file>icons/magnet-symbolic.svg</file>
+    <file>icons/axes-one-quadrant-symbolic.svg</file>
     <file>icons/ruler-outline-horizontal-symbolic.svg</file>
     <file>icons/plus-large-square-outline-symbolic.svg</file>
     <file>icons/arrow-hook-left-horizontal2-symbolic.svg</file>
@@ -23,6 +24,7 @@
     <file>icons/eraser-symbolic.svg</file>
     <file>icons/line-trim-symbolic.svg</file>
     <file>icons/line-extend-symbolic.svg</file>
+    <file>icons/flip-h-symbolic.svg</file>
     <file>icons/layers-and-objects-symbolic.svg</file>
   </gresource>
 </gresources>

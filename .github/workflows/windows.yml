@@ -10,6 +10,8 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: write # สร้าง GitHub Release
 
     steps:
       - name: Checkout
@@ -262,3 +264,19 @@ jobs:
         with:
           name: drafting-windows
           path: release/*
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Get-ChildItem release -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content release\SHA256SUMS.txt -Encoding ascii
+
+          $files = Get-ChildItem release -File | ForEach-Object { $_.FullName }
+          gh release create "${{ github.ref_name }}" @files `
+            --title "Drafting ${{ github.ref_name }}" `
+            --notes "Windows developer preview. Download drafting.msix, drafting-cert.cer, install.bat and install.ps1 into the same folder, then double-click install.bat. SHA-256 checksums are in SHA256SUMS.txt." `
+            --prerelease
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }

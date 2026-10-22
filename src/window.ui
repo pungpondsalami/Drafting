@@ -198,6 +198,12 @@
                   </object>
                 </child>
                 <child>
+                  <object class="GtkToggleButton" id="btn_ortho">
+                    <property name="icon-name">axes-one-quadrant-symbolic</property>
+                    <property name="tooltip-text">Ortho (F8)</property>
+                  </object>
+                </child>
+                <child>
                   <object class="GtkToggleButton" id="btn_auto_pan">
                     <property name="icon-name">four-arrows-pointing-outward-symbolic</property>
                     <property name="tooltip-text">Auto-pan at window edges</property>
@@ -394,6 +400,12 @@
                           <object class="GtkButton" id="btn_array">
                             <property name="icon-name">grid-filled-symbolic</property>
                             <property name="tooltip-text">Array</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_mirror">
+                            <property name="icon-name">flip-h-symbolic</property>
+                            <property name="tooltip-text">Mirror (MI, select objects first)</property>
                           </object>
                         </child>
                         <child>

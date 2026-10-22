@@ -8,6 +8,12 @@ use crate::text::{self, HAlign, VAlign};
 
 pub const DEFAULT_DIMENSION_OFFSET: f64 = 30.0;
 
+/// ช่วงซูม (พิกเซลต่อ 1 หน่วยของแบบ = mm)
+pub const MIN_SCALE: f64 = 0.0002;
+pub const MAX_SCALE: f64 = 5000.0;
+/// Cairo รับพิกัดหน้าจอได้ราว ±8 ล้านพิกเซล: เผื่อไว้ครึ่งหนึ่งสำหรับปลายเส้นที่อยู่นอกจอ
+const SAFE_SCREEN_PX: f64 = 4.0e6;
+
 #[derive(Debug, Clone)]
 pub struct DimensionGeometry {
     pub start: Point,
@@ -61,6 +67,7 @@ pub enum ToolMode {
     Offset,
     Trim,
     Extend,
+    Mirror,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -234,6 +241,60 @@ impl ElementData {
     }
 }
 
+/// สะท้อนจุด p ข้ามเส้นตรงที่ผ่าน a และ b
+pub fn reflect_point(p: Point, a: Point, b: Point) -> Point {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let l2 = dx * dx + dy * dy;
+    if l2 < 1e-24 {
+        return p;
+    }
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+    let (fx, fy) = (a.x + dx * t, a.y + dy * t);
+    Point { x: 2.0 * fx - p.x, y: 2.0 * fy - p.y }
+}
+
+impl ElementData {
+    /// สำเนาที่สะท้อนข้ามเส้น a→b (ข้อความ: ย้ายตำแหน่ง แต่ไม่กลับด้านตัวอักษร)
+    pub fn mirrored(&self, a: Point, b: Point) -> ElementData {
+        let r = |p: &Point| reflect_point(*p, a, b);
+        let phi = (b.y - a.y).atan2(b.x - a.x);
+        match self {
+            ElementData::Line { start, end } => ElementData::Line { start: r(start), end: r(end) },
+            ElementData::Circle { center, radius } => {
+                ElementData::Circle { center: r(center), radius: *radius }
+            }
+            // การสะท้อนกลับด้านซ้าย-ขวา: offset ต้องกลับเครื่องหมายเพื่อให้เส้นมิติอยู่ฝั่งที่สะท้อนถูก
+            ElementData::Dimension { start, end, offset } => {
+                ElementData::Dimension { start: r(start), end: r(end), offset: -*offset }
+            }
+            ElementData::Arc { center, radius, start_angle, end_angle } => {
+                let span = end_angle - start_angle;
+                let s = (2.0 * phi - end_angle).rem_euclid(TAU);
+                ElementData::Arc { center: r(center), radius: *radius, start_angle: s, end_angle: s + span }
+            }
+            ElementData::Polyline { points, closed } => ElementData::Polyline {
+                points: points.iter().map(r).collect(),
+                closed: *closed,
+            },
+            ElementData::Fill { loops, filled } => ElementData::Fill {
+                loops: loops.iter().map(|l| l.iter().map(r).collect()).collect(),
+                filled: *filled,
+            },
+            ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
+                ElementData::Text {
+                    pos: r(pos),
+                    height: *height,
+                    rotation: *rotation,
+                    text: text.clone(),
+                    halign: *halign,
+                    valign: *valign,
+                    width: *width,
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Point {
     pub x: f64,
@@ -279,6 +340,8 @@ pub struct Camera {
     pub zoom_index: usize,
     pub offset: (f64, f64),
     pub target_offset: (f64, f64),
+    /// เพดานซูมเข้าตอนนี้ (Engine ปรับตามขนาดแบบ)
+    pub max_scale: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -452,6 +515,7 @@ impl Camera {
             zoom_index: 0,
             offset: (0.0, 0.0),
             target_offset: (0.0, 0.0),
+            max_scale: 50.0,
         }
     }
 
@@ -512,14 +576,14 @@ impl Camera {
 
     pub fn zoom_in_at(&mut self, screen_x: f64, screen_y: f64) {
         let (wx, wy) = self.screen_to_world_target(screen_x, screen_y);
-        self.target_scale = (self.target_scale * 1.2).min(50.0);
+        self.target_scale = (self.target_scale * 1.2).min(self.max_scale);
         self.target_offset.0 = screen_x - (wx * self.target_scale);
         self.target_offset.1 = screen_y - (-wy * self.target_scale);
     }
 
     pub fn zoom_out_at(&mut self, screen_x: f64, screen_y: f64) {
         let (wx, wy) = self.screen_to_world_target(screen_x, screen_y);
-        self.target_scale = (self.target_scale / 1.2).max(0.01);
+        self.target_scale = (self.target_scale / 1.2).max(MIN_SCALE);
         self.target_offset.0 = screen_x - (wx * self.target_scale);
         self.target_offset.1 = screen_y - (-wy * self.target_scale);
     }
@@ -532,7 +596,7 @@ impl Camera {
         factor: f64,
     ) {
         self.target_scale *= factor;
-        self.target_scale = self.target_scale.clamp(0.1, 10.0);
+        self.target_scale = self.target_scale.clamp(MIN_SCALE, self.max_scale);
         let center_x = screen_size.0 / 2.0;
         let center_y = screen_size.1 / 2.0;
         self.target_offset = (
@@ -563,6 +627,11 @@ pub struct Engine {
     pub skipped: usize,
     /// เพิ่มทุกครั้งที่การเลือก/สไตล์ของวัตถุอาจเปลี่ยน (UI ใช้ดูว่าต้องอัปเดตไหม)
     pub sel_rev: u64,
+    sel_bbox_cache: std::cell::Cell<(u64, usize, Option<(f64, f64, f64, f64)>)>,
+    /// กำลังลากย้าย: index ยังเป็นของตำแหน่งเดิม; moving = id ที่ต้องวาดเสมอ
+    moving: Vec<u64>,
+    index_stale: bool,
+    zoom_cap_key: (usize, u64),
 }
 
 impl Engine {
@@ -586,6 +655,10 @@ impl Engine {
             current_layer: 0,
             skipped: 0,
             sel_rev: 0,
+            sel_bbox_cache: std::cell::Cell::new((u64::MAX, 0, None)),
+            moving: Vec::new(),
+            index_stale: false,
+            zoom_cap_key: (usize::MAX, 0),
         }
     }
 
@@ -627,6 +700,7 @@ impl Engine {
     }
 
     pub fn select_at(&mut self, world_x: f64, world_y: f64, add_to_selection: bool) {
+        self.finish_move();
         self.sel_rev += 1;
         let top = self.pick_at(world_x, world_y);
 
@@ -641,6 +715,7 @@ impl Engine {
     }
 
     pub fn hover_at(&mut self, world_x: f64, world_y: f64) {
+        self.finish_move();
         self.hovered_id = self.pick_at(world_x, world_y);
     }
 
@@ -825,6 +900,8 @@ impl Engine {
     }
 
     const MAX_UNDO: usize = 100;
+    /// ผลรวมจำนวนวัตถุในทุก snapshot ของ Undo
+    const MAX_UNDO_ELEMS: usize = 1_000_000;
 
     fn index_of(&self, id: u64) -> Option<usize> {
         self.history.binary_search_by_key(&id, |e| e.id).ok()
@@ -836,6 +913,8 @@ impl Engine {
             idx.insert(el.id, el.bounding_box());
         }
         self.spatial_index = idx;
+        self.index_stale = false;
+        self.moving.clear();
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -856,11 +935,17 @@ impl Engine {
     }
 
     pub fn checkpoint(&mut self) {
+        self.finish_move();
         self.dirty = true;
         self.sel_rev += 1;
         let snap = self.snapshot();
         self.undo_stack.push(snap);
         if self.undo_stack.len() > Self::MAX_UNDO {
+            self.undo_stack.remove(0);
+        }
+        let mut total: usize = self.undo_stack.iter().map(|s| s.history.len()).sum();
+        while self.undo_stack.len() > 1 && total > Self::MAX_UNDO_ELEMS {
+            total -= self.undo_stack[0].history.len();
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
@@ -886,10 +971,22 @@ impl Engine {
 
     pub fn move_selected(&mut self, dx: f64, dy: f64) {
         self.sel_rev += 1;
+        if !self.index_stale {
+            self.moving = self.history.iter().filter(|e| e.is_selected).map(|e| e.id).collect();
+            self.index_stale = true;
+        }
         for el in self.history.iter_mut().filter(|e| e.is_selected) {
             el.data.translate(dx, dy);
         }
-        self.rebuild_index();
+    }
+
+    /// จบการลากย้าย: สร้าง spatial index ให้ตรงตำแหน่งใหม่
+    pub fn finish_move(&mut self) {
+        if self.index_stale {
+            self.index_stale = false;
+            self.moving.clear();
+            self.rebuild_index();
+        }
     }
 
     pub fn move_and_snap_selected(&mut self, dx: f64, dy: f64, snap_enabled: bool) {
@@ -915,6 +1012,123 @@ impl Engine {
                 self.move_selected(snap_dx, snap_dy);
             }
         }
+    }
+
+    /// ข้อมูลของวัตถุตาม id (ข้ามตัวที่ไม่มีแล้ว)
+    pub fn data_by_ids(&self, ids: &[u64]) -> Vec<&ElementData> {
+        ids.iter()
+            .filter_map(|&id| self.index_of(id))
+            .map(|i| &self.history[i].data)
+            .collect()
+    }
+
+    /// เหมือน mirror_selected แต่ระบุวัตถุด้วย id (animation เลือกไว้ตอนคลิก)
+    pub fn mirror_ids(&mut self, ids: &[u64], a: Point, b: Point, keep: bool) -> usize {
+        if (b.x - a.x).hypot(b.y - a.y) < 1e-9 {
+            return 0;
+        }
+        let sel: Vec<usize> = ids.iter().filter_map(|&id| self.index_of(id)).collect();
+        if sel.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        if keep {
+            let copies: Vec<DrawingElement> = sel
+                .iter()
+                .map(|&i| {
+                    let e = &self.history[i];
+                    DrawingElement {
+                        id: 0,
+                        is_selected: false,
+                        layer: e.layer,
+                        color: e.color,
+                        style: e.style.clone(),
+                        data: e.data.mirrored(a, b),
+                    }
+                })
+                .collect();
+            for mut c in copies {
+                c.id = self.get_next_id();
+                self.add_element(c);
+            }
+        } else {
+            for &i in &sel {
+                let m = self.history[i].data.mirrored(a, b);
+                self.history[i].data = m;
+            }
+            self.rebuild_index();
+        }
+        sel.len()
+    }
+
+    /// กรอบรวมของวัตถุที่เลือก (แคชตาม sel_rev ไม่คำนวณซ้ำทุกเฟรม)
+    pub fn selection_bbox(&self) -> Option<(Point, Point)> {
+        let c = self.sel_bbox_cache.get();
+        if c.0 == self.sel_rev && c.1 == self.history.len() {
+            return c.2.map(|(a, b, x, y)| (Point { x: a, y: b }, Point { x, y }));
+        }
+        let mut r: Option<(f64, f64, f64, f64)> = None;
+        for e in self.history.iter().filter(|e| e.is_selected) {
+            let b = e.bounding_box();
+            if !(b.min_x.is_finite() && b.max_x.is_finite() && b.min_y.is_finite() && b.max_y.is_finite()) {
+                continue;
+            }
+            r = Some(match r {
+                None => (b.min_x, b.min_y, b.max_x, b.max_y),
+                Some((a, bb, c2, d)) => (a.min(b.min_x), bb.min(b.min_y), c2.max(b.max_x), d.max(b.max_y)),
+            });
+        }
+        self.sel_bbox_cache.set((self.sel_rev, self.history.len(), r));
+        r.map(|(a, b, x, y)| (Point { x: a, y: b }, Point { x, y }))
+    }
+
+    /// ภาพเงาของวัตถุที่เลือกหลังสะท้อน (ว่างถ้าเลือกมากกว่า limit ชิ้น เพื่อไม่ให้หน่วง)
+    pub fn mirror_preview(&self, a: Point, b: Point, limit: usize) -> Vec<ElementData> {
+        let sel: Vec<&DrawingElement> =
+            self.history.iter().filter(|e| e.is_selected).take(limit + 1).collect();
+        if sel.len() > limit {
+            return Vec::new();
+        }
+        sel.iter().map(|e| e.data.mirrored(a, b)).collect()
+    }
+
+    /// สะท้อนวัตถุที่เลือกข้ามเส้น a→b; keep = เก็บต้นฉบับไว้ (สร้างสำเนา) คืนจำนวนชิ้นที่ทำ
+    pub fn mirror_selected(&mut self, a: Point, b: Point, keep: bool) -> usize {
+        if (b.x - a.x).hypot(b.y - a.y) < 1e-9 {
+            return 0;
+        }
+        let sel: Vec<usize> = (0..self.history.len()).filter(|&i| self.history[i].is_selected).collect();
+        if sel.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        if keep {
+            let copies: Vec<DrawingElement> = sel
+                .iter()
+                .map(|&i| {
+                    let e = &self.history[i];
+                    DrawingElement {
+                        id: 0,
+                        is_selected: false,
+                        layer: e.layer,
+                        color: e.color,
+                        style: e.style.clone(),
+                        data: e.data.mirrored(a, b),
+                    }
+                })
+                .collect();
+            for mut c in copies {
+                c.id = self.get_next_id();
+                self.add_element(c);
+            }
+        } else {
+            for &i in &sel {
+                let m = self.history[i].data.mirrored(a, b);
+                self.history[i].data = m;
+            }
+            self.rebuild_index();
+        }
+        sel.len()
     }
 
     pub fn commit_array(&mut self) {
@@ -1375,7 +1589,21 @@ impl Engine {
         let min_extent = 0.5 / self.camera.scale.max(1e-9);
         self.spatial_index.query_min(&viewport_bounds, min_extent, &mut hits);
         let mut ids: Vec<u64> = hits.into_iter().copied().collect();
+        // กำลังลากย้าย: index ยังเป็นตำแหน่งเดิม จึงเติมชิ้นที่ย้ายและอยู่ในจอตอนนี้เข้าไปเอง
+        for &id in &self.moving {
+            if let Some(i) = self.index_of(id) {
+                let b = self.history[i].bounding_box();
+                if b.max_x >= viewport_bounds.min_x
+                    && b.min_x <= viewport_bounds.max_x
+                    && b.max_y >= viewport_bounds.min_y
+                    && b.min_y <= viewport_bounds.max_y
+                {
+                    ids.push(id);
+                }
+            }
+        }
         ids.sort_unstable();
+        ids.dedup();
         ids.into_iter()
             .filter_map(|id| self.index_of(id).map(|i| &self.history[i]))
             .filter(|e| self.layers[e.layer].visible)
@@ -1410,6 +1638,18 @@ impl Engine {
         self.history.iter().collect()
     }
 
+    /// ซูมเข้าได้ลึกสุดเท่าไร: แบบใหญ่ → เพดานต่ำลง (แต่ไม่ต่ำกว่า 50 เท่าของเดิม)
+    fn zoom_limit(&self) -> f64 {
+        let diag = self
+            .fit_bounds()
+            .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
+            .unwrap_or(0.0);
+        if !(diag > 0.0) {
+            return MAX_SCALE;
+        }
+        (SAFE_SCREEN_PX / diag).clamp(50.0, MAX_SCALE)
+    }
+
     pub fn step(&mut self, current_time: u64) -> bool {
         let dt = if let Some(last) = self.last_update_time {
             (current_time - last) as f64 / 1_000_000.0
@@ -1420,6 +1660,11 @@ impl Engine {
 
         self.last_update_time = Some(current_time);
         let dt = dt.min(0.1);
+        let key = (self.history.len(), self.id_counter);
+        if key != self.zoom_cap_key {
+            self.zoom_cap_key = key;
+            self.camera.max_scale = self.zoom_limit();
+        }
 
         let camera_changed = self.camera.update(dt);
         let mut array_changed = false;
@@ -1471,7 +1716,59 @@ impl Engine {
         })
     }
 
+    /// ขอบเขตของงานหลัก: ตัดวัตถุที่หลุดไกลสุดขอบ (0.2% ต่อด้าน) ออก
+    pub fn fit_bounds(&self) -> Option<(Point, Point)> {
+        let n = self.history.len();
+        if n < 100 {
+            return self.get_elements_bounds();
+        }
+        let bbs: Vec<_> = self.history.iter().map(|e| e.bounding_box()).collect();
+        let mut xs: Vec<f64> = bbs.iter().map(|b| (b.min_x + b.max_x) * 0.5).collect();
+        let mut ys: Vec<f64> = bbs.iter().map(|b| (b.min_y + b.max_y) * 0.5).collect();
+        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        xs.sort_by(cmp);
+        ys.sort_by(cmp);
+        let lo = (n as f64 * 0.002) as usize;
+        let hi = n - 1 - lo;
+        let (x0, x1, y0, y1) = (xs[lo], xs[hi], ys[lo], ys[hi]);
+        let mut r: Option<(f64, f64, f64, f64)> = None;
+        for b in &bbs {
+            let (cx, cy) = ((b.min_x + b.max_x) * 0.5, (b.min_y + b.max_y) * 0.5);
+            if cx < x0 || cx > x1 || cy < y0 || cy > y1 {
+                continue;
+            }
+            r = Some(match r {
+                None => (b.min_x, b.min_y, b.max_x, b.max_y),
+                Some((a, bb, c, d)) => (a.min(b.min_x), bb.min(b.min_y), c.max(b.max_x), d.max(b.max_y)),
+            });
+        }
+        match r {
+            Some((a, b, c, d)) if (c - a).is_finite() && (d - b).is_finite() => {
+                let trimmed = (Point { x: a, y: b }, Point { x: c, y: d });
+                match self.get_elements_bounds() {
+                    // ตัดทิ้งก็ต่อเมื่อมีของหลุดไกลจริง (ขอบเขตเต็มกว้างกว่างานหลักเกิน 3 เท่า)
+                    Some(full)
+                        if (full.1.x - full.0.x).hypot(full.1.y - full.0.y)
+                            <= 3.0 * (c - a).hypot(d - b) =>
+                    {
+                        Some(full)
+                    }
+                    _ => Some(trimmed),
+                }
+            }
+            _ => self.get_elements_bounds(),
+        }
+    }
+
     pub fn zoom_to_fit(&mut self, screen_w: f64, screen_h: f64) {
+        if let Some((min_p, max_p)) = self.fit_bounds() {
+            self.camera
+                .focus_on_area(min_p, max_p, (screen_w, screen_h));
+        }
+    }
+
+    /// Zoom Extents จริง: ทุกชิ้น รวมที่หลุดไกล
+    pub fn zoom_to_extents(&mut self, screen_w: f64, screen_h: f64) {
         if let Some((min_p, max_p)) = self.get_elements_bounds() {
             self.camera
                 .focus_on_area(min_p, max_p, (screen_w, screen_h));
@@ -1489,20 +1786,10 @@ impl Engine {
         let step_major = grid_base / 10.0f64.powf(lod);
         let step_minor = step_major / 10.0;
 
-        let snap_coord = |coord: f64, major: f64, minor: f64| {
-            let nearest_major = (coord / major).round() * major;
-            let dist_to_major = (coord - nearest_major).abs();
-            if dist_to_major < (major * 0.3) {
-                nearest_major
-            } else {
-                (coord / minor).round() * minor
-            }
-        };
-
-        (
-            snap_coord(wx, step_major, step_minor),
-            snap_coord(wy, step_major, step_minor),
-        )
+        // snap ที่ช่องย่อยทุกช่อง (ช่องย่อยเป็นพหุคูณของกัน เส้นหลักจึงถูก snap ได้ด้วย)
+        // ซูมออกจนช่องย่อยถี่เกิน 8 px ค่อยถอยไป snap ที่ช่องหลัก
+        let step = if step_minor * scale >= 8.0 { step_minor } else { step_major };
+        ((wx / step).round() * step, (wy / step).round() * step)
     }
 
     pub fn find_object_snap(
@@ -1510,6 +1797,17 @@ impl Engine {
         wx: f64,
         wy: f64,
         settings: &SnapSettings,
+    ) -> Option<(Point, SnapKind)> {
+        self.find_object_snap_ex(wx, wy, settings, false)
+    }
+
+    /// exclude_selected = ไม่จับวัตถุที่เลือกอยู่ (ใช้ตอน Move เพราะมันกำลังเคลื่อนตามเมาส์)
+    pub fn find_object_snap_ex(
+        &self,
+        wx: f64,
+        wy: f64,
+        settings: &SnapSettings,
+        exclude_selected: bool,
     ) -> Option<(Point, SnapKind)> {
         let tol = 12.0 / self.camera.scale;
         let query_box = BoundingBox {
@@ -1526,6 +1824,7 @@ impl Engine {
             .copied()
             .filter_map(|id| self.index_of(id))
             .filter(|&i| self.layer_visible(i))
+            .filter(|&i| !(exclude_selected && self.history[i].is_selected))
             .map(|i| &self.history[i].data)
             .collect();
 
@@ -1634,10 +1933,21 @@ impl Engine {
         enabled: bool,
         settings: &SnapSettings,
     ) -> (f64, f64, Option<SnapKind>) {
+        self.get_input_snap_ex(wx, wy, enabled, settings, false)
+    }
+
+    pub fn get_input_snap_ex(
+        &self,
+        wx: f64,
+        wy: f64,
+        enabled: bool,
+        settings: &SnapSettings,
+        exclude_selected: bool,
+    ) -> (f64, f64, Option<SnapKind>) {
         if !enabled {
             return (wx, wy, None);
         }
-        if let Some((p, kind)) = self.find_object_snap(wx, wy, settings) {
+        if let Some((p, kind)) = self.find_object_snap_ex(wx, wy, settings, exclude_selected) {
             return (p.x, p.y, Some(kind));
         }
         let (x, y) = self.get_snapped_pos(wx, wy, true);
@@ -1719,6 +2029,15 @@ impl Engine {
                     let new_end_y = mid_y + (end.y - mid_y) * draw_scale;
                     let s = self.camera.world_to_screen(new_start_x, new_start_y);
                     let e = self.camera.world_to_screen(new_end_x, new_end_y);
+                    // ปลายอยู่ไกลเกินที่ Cairo รับได้ (~8 ล้าน px) → ตัดให้เหลือส่วนในกรอบก่อน
+                    let (s, e) = if s.0.abs().max(s.1.abs()).max(e.0.abs()).max(e.1.abs()) > 1.0e6 {
+                        match clip_line(s, e, (x0, y0, x1, y1)) {
+                            Some((a, b)) => (a, b),
+                            None => continue,
+                        }
+                    } else {
+                        (s, e)
+                    };
                     commands.push(RenderCommand::Line {
                         x1: s.0,
                         y1: s.1,
@@ -1856,6 +2175,42 @@ impl Engine {
         self.camera.offset = saved.1;
         r
     }
+}
+
+/// ตัดเส้นให้เหลือเฉพาะส่วนในกรอบ (Liang–Barsky) None = ไม่ตัดกรอบเลย
+fn clip_line(
+    (x1, y1): (f64, f64),
+    (x2, y2): (f64, f64),
+    (rx0, ry0, rx1, ry1): (f64, f64, f64, f64),
+) -> Option<((f64, f64), (f64, f64))> {
+    let (dx, dy) = (x2 - x1, y2 - y1);
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (p, q) in [
+        (-dx, x1 - rx0.min(rx1)),
+        (dx, rx0.max(rx1) - x1),
+        (-dy, y1 - ry0.min(ry1)),
+        (dy, ry0.max(ry1) - y1),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return None;
+                }
+                t0 = t0.max(r);
+            } else {
+                if r < t0 {
+                    return None;
+                }
+                t1 = t1.min(r);
+            }
+        }
+    }
+    Some(((x1 + dx * t0, y1 + dy * t0), (x1 + dx * t1, y1 + dy * t1)))
 }
 
 fn seg_seg(a1: Point, a2: Point, b1: Point, b2: Point) -> Option<Point> {

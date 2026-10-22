@@ -64,7 +64,7 @@ mod imp {
                 }
 
                 .drafting-floating {
-                    background-color: alpha(#2d2d2d, 0.68);
+                    background-color: alpha(#2d2d2d, 0.9);
                     background-image: none;
                     color: #f6f5f4;
                     border-radius: 18px;

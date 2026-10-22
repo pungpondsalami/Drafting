@@ -39,6 +39,18 @@ glib::wrapper! {
 }
 
 const OFFSET_ANIM_SECS: f64 = 0.12;
+const MIRROR_ANIM_SECS: f64 = 0.25;
+
+#[derive(Debug, Clone)]
+pub struct MirrorAnim {
+    pub ids: Vec<u64>,
+    pub a: (f64, f64),
+    pub b: (f64, f64),
+    pub keep: bool,
+    pub boxed: bool, // เลือกเยอะ → เล่นแอนิเมชันเฉพาะกรอบ
+    pub start_us: Option<i64>,
+    pub t: f64, // 0.0 → 1.0
+}
 const OFFSET_FLIP_SECS: f64 = 0.04;
 
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +126,8 @@ mod imp {
         #[template_child]
         pub btn_snap_menu: TemplateChild<gtk::ToggleButton>,
         #[template_child]
+        pub btn_ortho: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
         pub btn_arc: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_polyline: TemplateChild<gtk::Button>,
@@ -135,6 +149,8 @@ mod imp {
         pub btn_trim: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_extend: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_mirror: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_layers: TemplateChild<gtk::ToggleButton>,
         #[template_child]
@@ -184,6 +200,12 @@ mod imp {
         pub offset_k: Cell<f64>,
         pub offset_phase: Cell<u8>,
         pub shift_down: Cell<bool>,
+        pub mirror_anim: RefCell<Option<MirrorAnim>>,
+        pub ortho: Cell<bool>,
+        pub cursor_size: Cell<f64>,
+        /// จุดจับ (snap แล้ว) ตอนเริ่มย้าย และระยะที่ย้ายไปแล้ว
+        pub move_base: Cell<Option<(f64, f64)>>,
+        pub move_applied: Cell<(f64, f64)>,
     }
 
     #[glib::object_subclass]
@@ -222,6 +244,7 @@ mod imp {
 
             // ตั้งค่าเริ่มต้น
             self.snap_enabled.set(true);
+            self.cursor_size.set(5.0);
             self.btn_snap.set_active(true);
             self.current_mode.set(DrawingMode::Select);
             self.auto_pan_enabled.set(true);
@@ -266,6 +289,16 @@ mod imp {
                     // Undo: Ctrl+Z
                     if is_ctrl && (key == gdk::Key::z || key == gdk::Key::Z) {
                         obj.undo_action();
+                        return glib::Propagation::Stop;
+                    }
+
+                    // Ortho: F8
+                    if key == gdk::Key::F8 {
+                        let o = &obj.imp().ortho;
+                        o.set(!o.get());
+                        if let Some(page) = obj.imp().tab_view.selected_page() {
+                            page.child().queue_draw();
+                        }
                         return glib::Propagation::Stop;
                     }
 
@@ -488,6 +521,18 @@ mod imp {
                             // ส่งค่าเป้าหมายใหม่ไปให้ Engine
                             d.array_settings.spacing_y = spin.value();
                         }
+                        page.child().queue_draw();
+                    }
+                }
+            ));
+
+            // ปุ่ม Ortho (F8 / คำสั่ง ortho ไปเปลี่ยนค่า แล้ว sync_tool_buttons ตามให้ปุ่ม)
+            self.btn_ortho.connect_toggled(glib::clone!(
+                #[weak]
+                obj,
+                move |btn| {
+                    obj.imp().ortho.set(btn.is_active());
+                    if let Some(page) = obj.imp().tab_view.selected_page() {
                         page.child().queue_draw();
                     }
                 }
@@ -751,6 +796,12 @@ mod imp {
                 move |_| obj.set_tool(DrawingMode::Extend)
             ));
 
+            self.btn_mirror.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Mirror)
+            ));
+
             self.btn_delete.connect_clicked(glib::clone!(
                 #[weak]
                 obj,
@@ -772,7 +823,15 @@ mod imp {
                     {
                         let mut parts = text.split_whitespace();
                         let first = parts.next().unwrap_or("");
-                        let handled = if first == "of" || first == "offset" {
+                        let handled = if first == "cursorsize" {
+                            if let Some(v) = parts.next().and_then(|s| s.parse::<f64>().ok()) {
+                                obj.imp().cursor_size.set(v.clamp(1.0, 100.0));
+                            }
+                            if let Some(page) = obj.imp().tab_view.selected_page() {
+                                page.child().queue_draw();
+                            }
+                            true
+                        } else if first == "of" || first == "offset" {
                             obj.set_tool(DrawingMode::Offset);
                             if let Some(v) = parts.next().and_then(|s| s.parse::<f64>().ok()) {
                                 obj.set_offset_distance(v);
@@ -817,9 +876,20 @@ mod imp {
                                     d.camera.zoom_to_point(wx, wy, (w, h), 1.5);
                                 }
                             }
+                            "ze" | "extents" => {
+                                let pages = obj.imp().pages.borrow();
+                                if let Some(d_ref) = pages.get(&page) {
+                                    d_ref.borrow_mut().zoom_to_extents(w, h);
+                                }
+                            }
                             "s" | "select" => obj.imp().current_mode.set(DrawingMode::Select),
                             "l" | "line" => obj.imp().current_mode.set(DrawingMode::Line),
                             "c" | "circle" => obj.imp().current_mode.set(DrawingMode::Circle),
+                            "ortho" | "or" => {
+                                let o = &obj.imp().ortho;
+                                o.set(!o.get());
+                                page.child().queue_draw();
+                            }
                             "u" | "undo" => obj.undo_action(),
                             "r" | "redo" => obj.redo_action(),
                             "save" => obj.save_action(),
@@ -829,6 +899,7 @@ mod imp {
                             "pl" | "pline" | "polyline" => obj.set_tool(DrawingMode::Polyline),
                             "tr" | "trim" => obj.set_tool(DrawingMode::Trim),
                             "ex" | "extend" => obj.set_tool(DrawingMode::Extend),
+                            "mi" | "mirror" => obj.set_tool(DrawingMode::Mirror),
                             "del" | "delete" | "erase" => obj.delete_action(),
                             "la" | "layer" | "layers" => {
                                 let b = &obj.imp().btn_layers;
@@ -957,6 +1028,24 @@ impl DraftingWindow {
 
     pub fn set_tool(&self, mode: DrawingMode) {
         let imp = self.imp();
+        let mut mode = mode;
+        let mut hint = String::new();
+        if mode == DrawingMode::Mirror {
+            let any = imp
+                .tab_view
+                .selected_page()
+                .and_then(|p| {
+                    imp.pages
+                        .borrow()
+                        .get(&p)
+                        .map(|d| d.borrow().history.iter().any(|e| e.is_selected))
+                })
+                .unwrap_or(false);
+            if !any {
+                mode = DrawingMode::Select;
+                hint = "Select objects first, then Mirror (MI)".to_string();
+            }
+        }
         imp.current_mode.set(mode);
         imp.start_pos.set(None);
         imp.dimension_step.set(0);
@@ -970,6 +1059,22 @@ impl DraftingWindow {
         imp.offset_msg.borrow_mut().clear();
         if let Some(page) = imp.tab_view.selected_page() {
             page.child().queue_draw();
+        }
+        if !hint.is_empty() {
+            *imp.offset_msg.borrow_mut() = hint;
+            glib::timeout_add_local_once(
+                std::time::Duration::from_millis(2500),
+                glib::clone!(
+                    #[weak(rename_to = obj)]
+                    self,
+                    move || {
+                        obj.imp().offset_msg.borrow_mut().clear();
+                        if let Some(page) = obj.imp().tab_view.selected_page() {
+                            page.child().queue_draw();
+                        }
+                    }
+                ),
+            );
         }
         self.sync_tool_buttons();
     }
@@ -1002,6 +1107,9 @@ impl DraftingWindow {
     /// ให้ปุ่มของเครื่องมือที่ใช้อยู่ขึ้นสถานะ active (เรียกจาก tick ทุกเฟรม แต่ทำงานเฉพาะตอนโหมดเปลี่ยน)
     fn sync_tool_buttons(&self) {
         let imp = self.imp();
+        if imp.btn_ortho.is_active() != imp.ortho.get() {
+            imp.btn_ortho.set_active(imp.ortho.get());
+        }
         let mode = imp.current_mode.get();
         if imp.synced_mode.get() == Some(mode) {
             return;
@@ -1048,7 +1156,7 @@ impl DraftingWindow {
             }
         }
 
-        let buttons: [(&gtk::Button, DrawingMode); 10] = [
+        let buttons: [(&gtk::Button, DrawingMode); 11] = [
             (&imp.btn_select, DrawingMode::Select),
             (&imp.btn_line, DrawingMode::Line),
             (&imp.btn_circle, DrawingMode::Circle),
@@ -1059,6 +1167,7 @@ impl DraftingWindow {
             (&imp.btn_offset, DrawingMode::Offset),
             (&imp.btn_trim, DrawingMode::Trim),
             (&imp.btn_extend, DrawingMode::Extend),
+            (&imp.btn_mirror, DrawingMode::Mirror),
         ];
 
         for (btn, m) in buttons {
@@ -1137,7 +1246,7 @@ impl DraftingWindow {
             .vexpand(true)
             .focusable(true)
             .can_focus(true)
-            .cursor(&gdk::Cursor::from_name("crosshair", None).unwrap())
+            .cursor(&gdk::Cursor::from_name("none", None).unwrap())
             .build();
 
         let page = imp.tab_view.add_page(&canvas, None);
@@ -1310,7 +1419,7 @@ impl DraftingWindow {
                     let cam = &mut d.camera;
                     let wx = (sx - cam.target_offset.0) / cam.target_scale;
                     let wy = -(sy - cam.target_offset.1) / cam.target_scale;
-                    cam.target_scale = (pinch_base.get() * scale).clamp(0.01, 50.0);
+                    cam.target_scale = (pinch_base.get() * scale).clamp(crate::engine::MIN_SCALE, crate::engine::MAX_SCALE);
                     cam.target_offset.0 = sx - wx * cam.target_scale;
                     cam.target_offset.1 = sy + wy * cam.target_scale;
                 }
@@ -1327,6 +1436,10 @@ impl DraftingWindow {
             #[upgrade_or]
             glib::ControlFlow::Continue,
             move |area, clock| {
+                // แท็บที่ซ่อนอยู่ไม่ต้องทำอะไร (กันแย่ง animation ของแท็บที่เปิด และประหยัด CPU)
+                if obj.imp().tab_view.selected_page().as_ref() != Some(&page) {
+                    return glib::ControlFlow::Continue;
+                }
                 obj.sync_tool_buttons();
                 obj.sync_selection_ui();
                 let pages = obj.imp().pages.borrow();
@@ -1335,6 +1448,33 @@ impl DraftingWindow {
 
                     // เรียกใช้ฟังก์ชัน step ของ Engine
                     if d.step(clock.frame_time() as u64) {
+                        area.queue_draw();
+                    }
+
+                    // Mirror: เดินเวลา แล้วสะท้อนจริงตอนจบ
+                    let mut mirror_done: Option<MirrorAnim> = None;
+                    {
+                        let mut slot = obj.imp().mirror_anim.borrow_mut();
+                        let is_current =
+                            obj.imp().tab_view.selected_page().as_ref() == Some(&page);
+                        if let Some(m) = slot.as_mut().filter(|_| is_current) {
+                            let now = clock.frame_time();
+                            let start = *m.start_us.get_or_insert(now);
+                            m.t = ((now - start) as f64 / 1_000_000.0 / MIRROR_ANIM_SECS).min(1.0);
+                            let finished = m.t >= 1.0;
+                            if finished {
+                                mirror_done = slot.take();
+                            }
+                            area.queue_draw();
+                        }
+                    }
+                    if let Some(m) = mirror_done {
+                        d.mirror_ids(
+                            &m.ids,
+                            Point { x: m.a.0, y: m.a.1 },
+                            Point { x: m.b.0, y: m.b.1 },
+                            m.keep,
+                        );
                         area.queue_draw();
                     }
 
@@ -1469,8 +1609,26 @@ impl DraftingWindow {
                             .contains(gdk::ModifierType::BUTTON1_MASK);
 
                         if !is_pressed {
+                            d.finish_move();
+                            obj.imp().move_base.set(None);
                             obj.imp().current_mode.set(DrawingMode::Select);
                             obj.imp().drag_start.set(None);
+                        } else if let Some((bx, by)) = obj.imp().move_base.get() {
+                            // ย้ายตามจุด snap (object snap → กริด) ลบจุดจับ
+                            let (wx, wy) = d.camera.screen_to_world(x, y);
+                            let (tx, ty, _) = d.get_input_snap_ex(
+                                wx,
+                                wy,
+                                obj.imp().snap_enabled.get(),
+                                &obj.imp().snap_settings.get(),
+                                true,
+                            );
+                            let want = (tx - bx, ty - by);
+                            let (ax, ay) = obj.imp().move_applied.get();
+                            if (want.0 - ax).abs() > 1e-12 || (want.1 - ay).abs() > 1e-12 {
+                                d.move_selected(want.0 - ax, want.1 - ay);
+                                obj.imp().move_applied.set(want);
+                            }
                         } else if let Some((sx, sy)) = obj.imp().drag_start.get() {
                             let (wx1, wy1) = d.camera.screen_to_world(sx, sy);
                             let (wx2, wy2) = d.camera.screen_to_world(x, y);
@@ -1511,7 +1669,9 @@ impl DraftingWindow {
                     let pages = imp.pages.borrow();
                     if let Some(d_ref) = pages.get(&page) {
                         let mut d = d_ref.borrow_mut();
-                        d.move_and_snap_selected(0.0, 0.0, imp.snap_enabled.get());
+                        d.dirty = true;
+                        d.finish_move();
+                        imp.move_base.set(None);
                     }
                     imp.current_mode.set(DrawingMode::Select);
                     imp.drag_start.set(None);
@@ -1539,6 +1699,15 @@ impl DraftingWindow {
 
                             if hit_selected {
                                 d.checkpoint(); // ก่อนเริ่มย้าย
+                                let (bx, by, _) = d.get_input_snap_ex(
+                                    wx,
+                                    wy,
+                                    imp.snap_enabled.get(),
+                                    &imp.snap_settings.get(),
+                                    false,
+                                );
+                                imp.move_base.set(Some((bx, by)));
+                                imp.move_applied.set((0.0, 0.0));
                                 obj.imp().current_mode.set(DrawingMode::Move);
                             }
                         }
@@ -1581,8 +1750,9 @@ impl DraftingWindow {
                         }
                         DrawingMode::Dimension => {
                             let step = imp.dimension_step.get();
-                            let (sx, sy, _) =
+                            let (sx, sy, sk) =
                                 d.get_input_snap(wx, wy, imp.snap_enabled.get(), &imp.snap_settings.get());
+                            let (sx, sy) = if sk.is_none() { obj.ortho_apply((sx, sy)) } else { (sx, sy) };
                             let p = Point { x: sx, y: sy };
                             match step {
                                 0 => {
@@ -1644,12 +1814,13 @@ impl DraftingWindow {
                             }
                         }
                         DrawingMode::Polyline => {
-                            let (sx, sy, _) = d.get_input_snap(
+                            let (sx, sy, sk) = d.get_input_snap(
                                 wx,
                                 wy,
                                 imp.snap_enabled.get(),
                                 &imp.snap_settings.get(),
                             );
+                            let (sx, sy) = if sk.is_none() { obj.ortho_apply((sx, sy)) } else { (sx, sy) };
                             let p = Point { x: sx, y: sy };
                             let mut pts = imp.pending_points.borrow_mut();
                             let close = pts.len() >= 3 && {
@@ -1706,6 +1877,53 @@ impl DraftingWindow {
                             }
                         }
 
+                        DrawingMode::Mirror => {
+                            let (sx, sy, sk) = d.get_input_snap(
+                                wx,
+                                wy,
+                                imp.snap_enabled.get(),
+                                &imp.snap_settings.get(),
+                            );
+                            let (sx, sy) =
+                                if sk.is_none() { obj.ortho_apply((sx, sy)) } else { (sx, sy) };
+                            match imp.start_pos.get() {
+                                None => imp.start_pos.set(Some((sx, sy))),
+                                Some((ax, ay)) => {
+                                    if (sx - ax).hypot(sy - ay) > 1e-9 {
+                                        let keep = !(gesture
+                                            .current_event_state()
+                                            .contains(gdk::ModifierType::SHIFT_MASK)
+                                            || imp.shift_down.get());
+                                        let ids: Vec<u64> = d
+                                            .history
+                                            .iter()
+                                            .filter(|e| e.is_selected)
+                                            .map(|e| e.id)
+                                            .collect();
+                                        if imp.mirror_anim.borrow().is_some() {
+                                            d.mirror_selected(
+                                                Point { x: ax, y: ay },
+                                                Point { x: sx, y: sy },
+                                                keep,
+                                            );
+                                        } else if !ids.is_empty() {
+                                            *imp.mirror_anim.borrow_mut() = Some(MirrorAnim {
+                                                boxed: ids.len() > 3000,
+                                                ids,
+                                                a: (ax, ay),
+                                                b: (sx, sy),
+                                                keep,
+                                                start_us: None,
+                                                t: 0.0,
+                                            });
+                                        }
+                                        imp.start_pos.set(None);
+                                        imp.current_mode.set(DrawingMode::Select);
+                                    }
+                                }
+                            }
+                        }
+
                         DrawingMode::Move => {}
                     }
                 }
@@ -1732,7 +1950,9 @@ impl DraftingWindow {
                     let pages = imp.pages.borrow();
                     if let Some(d_ref) = pages.get(&page) {
                         let mut d = d_ref.borrow_mut();
-                        d.move_and_snap_selected(0.0, 0.0, imp.snap_enabled.get());
+                        d.dirty = true;
+                        d.finish_move();
+                        imp.move_base.set(None);
                     }
                     imp.current_mode.set(DrawingMode::Select);
                     imp.drag_start.set(None);
@@ -1770,12 +1990,13 @@ impl DraftingWindow {
                     if let Some(d_ref) = pages.get(&page) {
                         let mut d = d_ref.borrow_mut();
                         let (wx, wy) = d.camera.screen_to_world(x, y);
-                        let (ex, ey, _) = d.get_input_snap(
+                        let (ex, ey, ek) = d.get_input_snap(
                             wx,
                             wy,
                             imp.snap_enabled.get(),
                             &imp.snap_settings.get(),
                         );
+                        let (ex, ey) = if ek.is_none() { obj.ortho_apply((ex, ey)) } else { (ex, ey) };
 
                         match imp.current_mode.get() {
                             DrawingMode::Line => {
@@ -1893,8 +2114,19 @@ impl DraftingWindow {
 
         // --- Snap position ---
         let (wx, wy) = cam.screen_to_world(rx, ry);
-        let (sn_x, sn_y, snap_kind) =
-            d.get_input_snap(wx, wy, imp.snap_enabled.get(), &imp.snap_settings.get());
+        let (sn_x, sn_y, snap_kind) = d.get_input_snap_ex(
+            wx,
+            wy,
+            imp.snap_enabled.get(),
+            &imp.snap_settings.get(),
+            imp.current_mode.get() == DrawingMode::Move,
+        );
+
+        let (sn_x, sn_y) = if snap_kind.is_none() {
+            self.ortho_apply((sn_x, sn_y))
+        } else {
+            (sn_x, sn_y)
+        };
 
         paint_grid(cr, cam, w, h);
 
@@ -2011,6 +2243,12 @@ impl DraftingWindow {
                 DrawingMode::Arc | DrawingMode::Polyline | DrawingMode::Offset => {}
                 DrawingMode::Trim => {}
                 DrawingMode::Extend => {}
+                DrawingMode::Mirror => {
+                    let (psx, psy) = cam.world_to_screen(sx, sy);
+                    let (pex, pey) = cam.world_to_screen(sn_x, sn_y);
+                    cr.move_to(psx, psy);
+                    cr.line_to(pex, pey);
+                }
 
                 // --- Dimension ---
                 DrawingMode::Dimension => {
@@ -2237,6 +2475,78 @@ impl DraftingWindow {
             }
         }
 
+        // --- Mirror flip animation ---
+        if let Some(m) = imp.mirror_anim.borrow().as_ref() {
+            let ease = m.t * m.t * (3.0 - 2.0 * m.t);
+            let mut s = (std::f64::consts::PI * ease).cos(); // +1 → -1
+            if s.abs() < 1e-3 {
+                s = 1e-3; // เมทริกซ์ห้ามเป็นศูนย์ ไม่งั้น Cairo เข้าสถานะ error
+            }
+            let (ax, ay) = cam.world_to_screen(m.a.0, m.a.1);
+            let (bx, by) = cam.world_to_screen(m.b.0, m.b.1);
+            let psi = (by - ay).atan2(bx - ax);
+            cr.save().ok();
+            cr.new_path();
+            cr.translate(ax, ay);
+            cr.rotate(psi);
+            cr.scale(1.0, s);
+            cr.rotate(-psi);
+            cr.translate(-ax, -ay);
+            if m.boxed {
+                if let Some((p0, p1)) = d.selection_bbox() {
+                    for (i, (x, y)) in [(p0.x, p0.y), (p1.x, p0.y), (p1.x, p1.y), (p0.x, p1.y)]
+                        .iter()
+                        .enumerate()
+                    {
+                        let (sx, sy) = cam.world_to_screen(*x, *y);
+                        if i == 0 { cr.move_to(sx, sy); } else { cr.line_to(sx, sy); }
+                    }
+                    cr.close_path();
+                }
+            } else {
+                for data in d.data_by_ids(&m.ids) {
+                    trace_ghost(cr, cam, data);
+                }
+            }
+            cr.restore().ok(); // path อยู่ต่อ แต่เส้นเขียนด้วยเมทริกซ์ปกติ ความหนาไม่เพี้ยน
+            cr.set_source_rgba(1.0, 0.5, 0.0, 0.9);
+            cr.set_line_width(1.5);
+            let _ = cr.stroke();
+        }
+
+        // --- Mirror ghost ---
+        if imp.current_mode.get() == DrawingMode::Mirror {
+            if let Some((ax, ay)) = imp.start_pos.get() {
+                let ghosts = d.mirror_preview(
+                    Point { x: ax, y: ay },
+                    Point { x: sn_x, y: sn_y },
+                    3000,
+                );
+                cr.new_path();
+                cr.set_source_rgba(1.0, 0.5, 0.0, 0.7);
+                cr.set_line_width(1.5);
+                for g in &ghosts {
+                    trace_ghost(cr, cam, g);
+                }
+                // เลือกเยอะจนไม่มี ghost → แสดงกรอบที่สะท้อนแล้วแทน
+                if ghosts.is_empty() {
+                    if let Some((p0, p1)) = d.selection_bbox() {
+                        let (la, lb) = (Point { x: ax, y: ay }, Point { x: sn_x, y: sn_y });
+                        for (i, (x, y)) in [(p0.x, p0.y), (p1.x, p0.y), (p1.x, p1.y), (p0.x, p1.y)]
+                            .iter()
+                            .enumerate()
+                        {
+                            let r = crate::engine::reflect_point(Point { x: *x, y: *y }, la, lb);
+                            let (sx, sy) = cam.world_to_screen(r.x, r.y);
+                            if i == 0 { cr.move_to(sx, sy); } else { cr.line_to(sx, sy); }
+                        }
+                        cr.close_path();
+                    }
+                }
+                let _ = cr.stroke();
+            }
+        }
+
         // --- Selection Box ---
         if imp.is_dragging.get() && imp.current_mode.get() == DrawingMode::Select {
             if let Some((sx, sy)) = imp.drag_start.get() {
@@ -2266,15 +2576,29 @@ impl DraftingWindow {
             }
         }
 
-        // Crosshair
-        let (cx, cy) = cam.world_to_screen(sn_x, sn_y);
-        cr.set_source_rgb(1.0, 0.0, 0.0);
-        cr.set_line_width(1.0);
-        cr.move_to(cx, 0.0);
-        cr.line_to(cx, h);
-        cr.move_to(0.0, cy);
-        cr.line_to(w, cy);
-        let _ = cr.stroke();
+        // Crosshair: เส้นสั้น (CURSORSIZE %) + pickbox ในโหมดที่เลือกวัตถุ
+        {
+            let (cx, cy) = cam.world_to_screen(sn_x, sn_y);
+            let (cx, cy) = (cx.round() + 0.5, cy.round() + 0.5);
+            let pct = imp.cursor_size.get();
+            let half = if pct >= 100.0 { w.max(h) } else { w.min(h) * pct / 100.0 };
+            cr.set_source_rgb(1.0, 0.0, 0.0);
+            cr.set_line_width(1.0);
+            cr.move_to((cx - half).max(0.0), cy);
+            cr.line_to((cx + half).min(w), cy);
+            cr.move_to(cx, (cy - half).max(0.0));
+            cr.line_to(cx, (cy + half).min(h));
+            let _ = cr.stroke();
+
+            if matches!(
+                imp.current_mode.get(),
+                DrawingMode::Select | DrawingMode::Move | DrawingMode::Trim | DrawingMode::Extend
+            ) {
+                const PICK: f64 = 5.0; // ครึ่งหนึ่งของด้าน (px)
+                cr.rectangle(cx - PICK, cy - PICK, 2.0 * PICK, 2.0 * PICK);
+                let _ = cr.stroke();
+            }
+        }
 
         // Object snap marker
         if let Some(kind) = snap_kind {
@@ -2325,9 +2649,16 @@ impl DraftingWindow {
             DrawingMode::Offset => "OFFSET",
             DrawingMode::Trim => "TRIM",
             DrawingMode::Extend => "EXTEND",
+            DrawingMode::Mirror => "MIRROR",
         };
 
-        let offset_hint = if imp.current_mode.get() == DrawingMode::Offset {
+        let offset_hint = if imp.current_mode.get() == DrawingMode::Mirror {
+            if imp.start_pos.get().is_none() {
+                "  click first point of mirror line".to_string()
+            } else {
+                "  click second point | Shift: delete originals".to_string()
+            }
+        } else if imp.current_mode.get() == DrawingMode::Offset {
             let dist = imp.offset_distance.get();
             let msg = imp.offset_msg.borrow();
             let step = if dist <= 0.0 {
@@ -2347,6 +2678,8 @@ impl DraftingWindow {
                 "click near the end to extend | Shift: trim"
             };
             if msg.is_empty() { format!("  {}", step) } else { format!("  {} | {}", step, msg) }
+        } else if !imp.offset_msg.borrow().is_empty() {
+            format!("  {}", imp.offset_msg.borrow())
         } else {
             String::new()
         };
@@ -2357,7 +2690,11 @@ impl DraftingWindow {
             d.layers[d.current_layer].name,
             sn_x,
             sn_y,
-            if imp.snap_enabled.get() { "[SNAP]" } else { "" },
+            format!(
+                "{}{}",
+                if imp.snap_enabled.get() { "[SNAP]" } else { "" },
+                if imp.ortho.get() { "[ORTHO]" } else { "" }
+            ),
             snap_kind.map(|k| format!(" [{}]", k.label())).unwrap_or_default(),
             offset_hint,
         );
@@ -2372,6 +2709,35 @@ impl DraftingWindow {
         cr.set_source_rgb(1.0, 1.0, 0.0);
         cr.move_to(220.0 + padding, 15.0 + padding);
         let _ = pangocairo::functions::show_layout(cr, &layout);
+    }
+
+    /// จุดอ้างอิงของ Ortho: จุดก่อนหน้าของเส้น/polyline ที่กำลังวาด
+    fn ortho_base(&self) -> Option<(f64, f64)> {
+        let imp = self.imp();
+        if !imp.ortho.get() {
+            return None;
+        }
+        match imp.current_mode.get() {
+            DrawingMode::Line => imp.start_pos.get(),
+            DrawingMode::Mirror => imp.start_pos.get(),
+            DrawingMode::Dimension if imp.dimension_step.get() == 1 => imp.start_pos.get(),
+            DrawingMode::Polyline => imp.pending_points.borrow().last().map(|p| (p.x, p.y)),
+            _ => None,
+        }
+    }
+
+    /// ล็อกจุดให้อยู่แนวนอนหรือแนวตั้งจากจุดอ้างอิง (ตามแกนที่ห่างมากกว่า)
+    fn ortho_apply(&self, p: (f64, f64)) -> (f64, f64) {
+        match self.ortho_base() {
+            Some((bx, by)) => {
+                if (p.0 - bx).abs() >= (p.1 - by).abs() {
+                    (p.0, by)
+                } else {
+                    (bx, p.1)
+                }
+            }
+            None => p,
+        }
     }
 
     /// โฟกัสอยู่ในช่องที่รับข้อความ (ช่องคำสั่ง, spin ของ Array) หรือไม่
@@ -3425,6 +3791,43 @@ fn trace_element(cr: &gtk::cairo::Context, cam: &crate::engine::Camera, data: &E
         }
 
         _ => {}
+    }
+}
+
+/// วาดภาพเงา (ทุกชนิดวัตถุ) ลง path ปัจจุบัน
+fn trace_ghost(cr: &gtk::cairo::Context, cam: &crate::engine::Camera, data: &ElementData) {
+    match data {
+        ElementData::Dimension { start, end, offset } => {
+            if let Some(g) = linear_dimension_geometry(*start, *end, *offset) {
+                for (a, b) in [(g.start, g.dim_from), (g.end, g.dim_to), (g.dim_from, g.dim_to)] {
+                    let (ax, ay) = cam.world_to_screen(a.x, a.y);
+                    let (bx, by) = cam.world_to_screen(b.x, b.y);
+                    cr.move_to(ax, ay);
+                    cr.line_to(bx, by);
+                }
+            }
+        }
+        ElementData::Fill { loops, .. } => {
+            for l in loops {
+                for (i, p) in l.iter().enumerate() {
+                    let (x, y) = cam.world_to_screen(p.x, p.y);
+                    if i == 0 {
+                        cr.move_to(x, y);
+                    } else {
+                        cr.line_to(x, y);
+                    }
+                }
+                cr.close_path();
+            }
+        }
+        ElementData::Text { pos, .. } => {
+            let (x, y) = cam.world_to_screen(pos.x, pos.y);
+            cr.move_to(x - 4.0, y);
+            cr.line_to(x + 4.0, y);
+            cr.move_to(x, y - 4.0);
+            cr.line_to(x, y + 4.0);
+        }
+        other => trace_element(cr, cam, other),
     }
 }
 
