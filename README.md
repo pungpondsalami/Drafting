@@ -10,8 +10,10 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 
 - Draw lines, circles, 3-point arcs, polylines and linear dimensions
 - Object snap: endpoint, midpoint, center, quadrant and intersection, each toggleable from the snap settings dock
-- Grid snapping with adaptive LOD grid
+- Grid snapping with adaptive LOD grid (snaps to every minor grid step)
+- Ortho mode (`F8` or the Ortho button): lock lines, polylines, dimensions and the mirror axis to horizontal or vertical; object snap overrides it
 - Offset (line, circle, arc, polyline) with preview
+- Mirror the selected objects across a line, with a live preview and a flip animation; keeps the originals, `Shift` deletes them. With more than 3000 objects selected the preview and animation show only the bounding box
 - Trim and Extend (line, arc, circle, polyline) with live preview; hold `Shift` to swap between the two
 - Delete the selected objects (`Delete` key or `del` command)
 - Layers: show/hide, lock and pick the current layer from the Layers panel (right dock, or the `la` command); new objects go on the current layer and are drawn in the layer's color
@@ -20,11 +22,13 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Rectangular array with preview
 - Multi-select with window/crossing selection (AutoCAD-style)
 - Move tool with snap
-- Mirror: select objects, then `MI` or the Mirror button and click two points; hold `Shift` on the second click to delete the originals
 - Undo / Redo
 - Command bar interface
+- AutoCAD-style crosshair: a short red cross (size set with `cursorsize`) with a pick box when selecting
 - Auto-pan at window edges
 - Pan with the middle mouse button, `Space` + drag, or a two-finger scroll on a touchpad; zoom with the wheel, `Ctrl` + scroll or a pinch
+- Wide zoom range (units are mm); the zoom-in limit shrinks for very large drawings so Cairo stays accurate
+- Zoom to fit ignores a few far-away stray objects so the real drawing fills the view; `ze` zooms to everything
 - Text and MText display (read, move, copy and save)
 - Open DXF and DWG files (DWG is read-only; Save writes DXF)
 - Block inserts and dimensions from other CAD programs
@@ -130,6 +134,9 @@ cargo run
 | `Delete` | Delete the selected objects |
 | `S` | Select mode |
 | `Z` | Zoom to cursor |
+| `Ctrl` + `F` | Zoom to fit |
+| `F8` | Toggle Ortho |
+| `F9` | Toggle Snap |
 
 ## Command Bar
 
@@ -144,10 +151,14 @@ Type commands in the command bar at the bottom:
 | `of`, `offset`, `of [dist]` | Offset tool |
 | `tr`, `trim` | Trim tool |
 | `ex`, `extend` | Extend tool |
+| `mi`, `mirror` | Mirror the selected objects (select first) |
 | `del`, `delete`, `erase` | Delete the selected objects |
 | `la`, `layer`, `layers` | Show or hide the Layers panel |
 | `ar`, `array` | Rectangular array |
-| `fit` | Zoom to fit |
+| `ortho`, `or` | Toggle Ortho |
+| `cursorsize [1-100]` | Crosshair size in % of the view (100 = full screen) |
+| `fit` | Zoom to fit (ignores far-away strays) |
+| `ze`, `extents` | Zoom to every object |
 | `z` | Zoom in at cursor |
 | `u`, `undo` | Undo |
 | `r`, `redo` | Redo |
@@ -160,6 +171,10 @@ Type commands in the command bar at the bottom:
 - **Trim**: click the part of an object to remove. Every other object acts as a cutting edge. A circle needs two cutting edges.
 - **Extend**: click near the end of a line, arc or polyline to extend it to the nearest boundary.
 - Objects that only touch at an endpoint do not count as crossing.
+
+## Mirror
+
+Select objects, then start Mirror (`mi` or the Mirror button). Click two points for the mirror line. The originals are kept; hold `Shift` on the second click to delete them. Text is moved to its mirrored position but its letters are not flipped (like AutoCAD with `MIRRTEXT` = 0). Ortho and object snap work for the axis points.
 
 ## Layers
 
@@ -182,6 +197,8 @@ Open the panel with the layers button in the right dock (or type `la`).
 - Block attributes (ATTRIB) are not shown.
 - DWG files can be opened but not saved; use Save As to write a DXF.
 - Linetypes that contain text or shapes are drawn as plain dashes.
+- Undo keeps at most 100 steps and about one million objects in total, so very large drawings can be undone fewer times.
+- There is no autosave yet; save often.
 
 ## License
 
