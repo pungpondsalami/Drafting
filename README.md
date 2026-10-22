@@ -4,7 +4,7 @@
 
 A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows developer preview is also available.
 
-![Drafting Screenshot](docs/Drafting-preview.png)
+![Drafting Screenshot](docs/Drafting-preview-22-10-2026.png)
 
 ## Features
 
