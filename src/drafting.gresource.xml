@@ -28,5 +28,6 @@
     <file>icons/layers-and-objects-symbolic.svg</file>
     <file>icons/hatch-symbolic.svg</file>
     <file>icons/text-t-symbolic.svg</file>
+    <file>icons/dashed-rectanngle-symbolic.svg</file>
   </gresource>
 </gresources>

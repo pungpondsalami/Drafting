@@ -3,12 +3,6 @@
   <menu id="primary_menu">
     <section>
       <item>
-        <attribute name="label" translatable="yes">_Layout / Print</attribute>
-        <attribute name="action">win.layout</attribute>
-      </item>
-    </section>
-    <section>
-      <item>
         <attribute name="label" translatable="yes">_About Drafting</attribute>
         <attribute name="action">app.about</attribute>
       </item>
@@ -28,16 +22,6 @@
         <child>
           <object class="AdwTabBar" id="tab_bar">
             <property name="view">tab_view</property>
-            <property name="end-action-widget">
-              <object class="GtkButton" id="btn_layout">
-                <property name="label">Layout</property>
-                <property name="tooltip-text">Layout / Print (lay)</property>
-                <property name="valign">center</property>
-                <style>
-                  <class name="flat"/>
-                </style>
-              </object>
-            </property>
           </object>
         </child>
 
@@ -115,6 +99,12 @@
                       <object class="GtkButton" id="btn_save">
                         <property name="icon-name">arrow-pointing-at-line-down-symbolic</property>
                         <property name="tooltip-text">Save (Ctrl+S)</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="btn_layout">
+                        <property name="icon-name">dashed-rectanngle-symbolic</property>
+                        <property name="tooltip-text">Layout / Print (lay)</property>
                       </object>
                     </child>
                   </object>

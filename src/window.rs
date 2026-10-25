@@ -681,12 +681,6 @@ mod imp {
                 }
             ));
 
-            self.btn_layout.connect_clicked(glib::clone!(
-                #[weak]
-                obj,
-                move |_| obj.layout_command()
-            ));
-
             let layout_action = gtk::gio::SimpleAction::new("layout", None);
             layout_action.connect_activate(glib::clone!(
                 #[weak]
@@ -694,6 +688,12 @@ mod imp {
                 move |_, _| obj.layout_command()
             ));
             obj.add_action(&layout_action);
+
+            self.btn_layout.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.layout_command()
+            ));
 
             self.btn_line.connect_clicked(glib::clone!(
                 #[weak]
@@ -2872,7 +2872,7 @@ impl DraftingWindow {
         let padding = 10.0;
 
         cr.set_source_rgb(1.0, 1.0, 0.0);
-        cr.move_to(220.0 + padding, 15.0 + padding);
+        cr.move_to(250.0 + padding, 15.0 + padding);
         let _ = pangocairo::functions::show_layout(cr, &layout);
     }
 

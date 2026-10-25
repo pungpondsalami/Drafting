@@ -22,6 +22,28 @@ thread_local! {
     static HIDDEN: RefCell<Vec<glib::WeakRef<gtk::Widget>>> = const { RefCell::new(Vec::new()) };
 }
 
+/// animation เปลี่ยนสเกลของ viewport ตอนหมุนล้อ: บันทึกภาพที่สเกลเป้าหมายครั้งเดียว (เวกเตอร์)
+/// แล้วย่อ/ขยายภาพนั้นระหว่างเล่น จบแล้ววาดจริงอีกครั้ง
+struct VpAnim {
+    idx: usize,
+    from_n: f64,
+    to_n: f64,
+    t: f64,
+    /// สำเนาค่ากรอบตอนเริ่ม ใช้เช็กว่าไม่มีอะไรเปลี่ยนระหว่างเล่น
+    snap: (f64, f64, f64, f64),
+    rec: RefCell<Option<gtk::cairo::RecordingSurface>>,
+}
+
+impl VpAnim {
+    fn cur_n(&self) -> f64 {
+        let e = 1.0 - (1.0 - self.t.clamp(0.0, 1.0)).powi(2);
+        self.from_n * (self.to_n / self.from_n).powf(e)
+    }
+    fn matches(&self, v: &Viewport) -> bool {
+        (v.n - self.to_n).abs() < 1e-9 && self.snap == (v.cx, v.cy, v.w, v.h)
+    }
+}
+
 enum Drag {
     Create { x0: f64, y0: f64, x1: f64, y1: f64 },
     Move { i: usize, ox: f64, oy: f64 },
@@ -51,7 +73,17 @@ struct LayoutTab {
     items_changed: Cell<bool>,
     view: PaperView,
     /// เป้าหมายซูมแบบนุ่ม: z เป้าหมาย + จุดยึด (หน้าจอ, กระดาษ)
+    vpa: Option<VpAnim>,
+    /// ฉากหลังจางๆ: ภาพความละเอียดต่ำของแบบทั้งชุด (ขาวดำ) + เลขแก้ไขที่สร้างจาก
+    bd: Option<gtk::cairo::ImageSurface>,
+    bd_key: Option<u64>,
+    bd_pending: bool,
+    bd_on: bool,
+    /// ตอน fit: (z, กึ่งกลางกระดาษบนจอ x, y) ใช้คำนวณ parallax
+    bd_ref: (f64, f64, f64),
     zt: f64,
+    /// ค่าคงที่เวลาของซูมนุ่ม (วินาที): ปกติ 0.04, ตอนเปิดแท็บ 0.10
+    ztau: f64,
     zanchor: ((f64, f64), (f64, f64)),
     fitted: bool,
     add_mode: bool,
@@ -282,7 +314,14 @@ impl DraftingWindow {
             sel_group: None,
             items_changed: Cell::new(false),
             view: PaperView { z: 1.0, ox: 0.0, oy: 0.0 },
+            vpa: None,
+            bd: None,
+            bd_key: None,
+            bd_pending: false,
+            bd_on: true,
+            bd_ref: (1.0, 0.0, 0.0),
             zt: 1.0,
+            ztau: 0.04,
             zanchor: ((0.0, 0.0), (0.0, 0.0)),
             fitted: false,
             add_mode: false,
@@ -317,7 +356,7 @@ impl DraftingWindow {
         let fit_btn = gtk::Button::with_label("Fit");
         let new_lay_btn = gtk::Button::with_label("New Layout");
         let del_lay_btn = gtk::Button::with_label("Delete Layout");
-        let print_btn = gtk::Button::with_label("Print");
+        let print_btn = gtk::Button::with_label("Print…");
 
         // toolbar_overlay: แถบลอยสไตล์เดียวกับ dock ของแอป วางทับกระดาษ ไม่กินที่
         let bar = gtk::Box::builder().spacing(6).margin_top(4).margin_bottom(4).margin_start(8).margin_end(8).build();
@@ -352,11 +391,11 @@ impl DraftingWindow {
             .propagate_natural_height(true)
             .child(&bar)
             .halign(gtk::Align::Center)
-            .valign(gtk::Align::Start)
-            // เว้นสองข้างให้พ้นปุ่มไฟล์ (ซ้ายบน) และปุ่มหน้าต่าง (ขวาบน)
-            .margin_top(8)
-            .margin_start(224)
-            .margin_end(176)
+            .valign(gtk::Align::End)
+            // อยู่ล่าง เหนือ Command bar (สูงราว 44 px + ขอบล่าง 18 px)
+            .margin_bottom(76)
+            .margin_start(24)
+            .margin_end(24)
             .build();
         for c in ["osd", "toolbar", "drafting-floating"] {
             scrolled.add_css_class(c);
@@ -388,14 +427,21 @@ impl DraftingWindow {
                     if !tb.fitted {
                         let (pw, ph) = tb.dims();
                         // เว้นบนให้แถบเครื่องมือ ล่างให้ Command bar
-                        let (top, bottom) = (72.0, 84.0);
+                        let (top, bottom) = (56.0, 136.0);
                         let mut v = PaperView::fit(w as f64, (h as f64 - top - bottom).max(100.0), pw, ph);
                         v.oy += top;
-                        tb.view = v;
+                        // เข้าฉาก: เริ่มที่ 60% รอบกึ่งกลางกระดาษ แล้วซูมนุ่มเข้าตำแหน่ง Fit
+                        let (ccx, ccy) = (v.ox + pw * v.z / 2.0, v.oy + ph * v.z / 2.0);
+                        let zs = v.z * 0.6;
+                        tb.view = PaperView { z: zs, ox: ccx - pw * zs / 2.0, oy: ccy - ph * zs / 2.0 };
                         tb.zt = v.z;
+                        tb.ztau = 0.10;
+                        tb.zanchor = ((ccx, ccy), (pw / 2.0, ph / 2.0));
+                        tb.bd_ref = (v.z, v.ox + pw * v.z / 2.0, v.oy + ph * v.z / 2.0);
                         tb.fitted = true;
                     }
                 }
+                obj.ensure_backdrop(&t);
                 obj.layout_draw(&t.borrow(), cr, w as f64, h as f64);
             }
         ));
@@ -417,7 +463,23 @@ impl DraftingWindow {
                     if over_sel {
                         let i = tb.sel.unwrap();
                         let n = tb.vps[i].n;
+                        // ค่าที่เห็นอยู่ตอนนี้ (ถ้ากำลังเล่น animation เดิม) เป็นจุดเริ่มของรอบใหม่
+                        let shown = match &tb.vpa {
+                            Some(a) if a.idx == i && a.matches(&tb.vps[i]) => a.cur_n(),
+                            _ => n,
+                        };
                         tb.vps[i].set_scale(step_scale(n, if dy < 0.0 { -1 } else { 1 }));
+                        let v = tb.vps[i];
+                        if (v.n - n).abs() > 1e-9 {
+                            tb.vpa = Some(VpAnim {
+                                idx: i,
+                                from_n: shown,
+                                to_n: v.n,
+                                t: 0.0,
+                                snap: (v.cx, v.cy, v.w, v.h),
+                                rec: RefCell::new(None),
+                            });
+                        }
                         tb.commit();
                     } else {
                         // ซูมนุ่ม: ตั้งเป้าหมาย แล้วให้ tick ค่อยๆ เลื่อนเข้าหา (ยึดจุดเคอร์เซอร์)
@@ -446,13 +508,21 @@ impl DraftingWindow {
                 let now = clock.frame_time();
                 let dt = ((now - last_us.replace(now)) as f64 / 1e6).clamp(0.0, 0.1);
                 let Ok(mut tb) = t.try_borrow_mut() else { return glib::ControlFlow::Continue };
+                if let Some(a) = tb.vpa.as_mut() {
+                    a.t += dt / 0.12;
+                    if a.t >= 1.0 {
+                        tb.vpa = None;
+                    }
+                    area.queue_draw();
+                }
                 if (tb.zt - tb.view.z).abs() < 1e-9 {
                     return glib::ControlFlow::Continue;
                 }
-                let k = 1.0 - (-dt / 0.04).exp();
+                let k = 1.0 - (-dt / tb.ztau.max(0.01)).exp();
                 let mut z = tb.view.z + (tb.zt - tb.view.z) * k;
                 if (z - tb.zt).abs() < tb.zt * 0.002 {
                     z = tb.zt;
+                    tb.ztau = 0.04;
                 }
                 let ((sx, sy), (px, py)) = tb.zanchor;
                 tb.view.z = z;
@@ -911,12 +981,107 @@ impl DraftingWindow {
         Some(print_prepare(cmds, mono))
     }
 
-    fn layout_draw(&self, t: &LayoutTab, cr: &gtk::cairo::Context, _w: f64, _h: f64) {
+    /// สร้างภาพฉากหลังใหม่เมื่อแบบเปลี่ยน: เก็บคำสั่งวาดของแบบทั้งชุดที่ขนาดเล็ก
+    /// แล้ววาดเป็นภาพในเธรดแยก (ไม่บล็อกหน้าจอ) ภาพเล็กขยายเต็มจอจึงเบลอเอง
+    fn ensure_backdrop(&self, t: &Rc<RefCell<LayoutTab>>) {
+        let (src, have, pending, on) = {
+            let tb = t.borrow();
+            (tb.src.upgrade(), tb.bd_key, tb.bd_pending, tb.bd_on)
+        };
+        if pending || !on {
+            return;
+        }
+        let Some(src) = src else { return };
+        let job = {
+            let pages = self.imp().pages.borrow();
+            let Some(d_ref) = pages.get(&src) else { return };
+            let Ok(mut d) = d_ref.try_borrow_mut() else { return };
+            let rev = d.scene_rev();
+            if have == Some(rev) {
+                return;
+            }
+            let Some((a, b)) = d.fit_bounds().or_else(|| d.get_elements_bounds()) else { return };
+            const LONG: f64 = 480.0;
+            let (dx, dy) = ((b.x - a.x).max(1e-6), (b.y - a.y).max(1e-6));
+            let (bw, bh) = if dx >= dy {
+                (LONG, (LONG * dy / dx).max(8.0).ceil())
+            } else {
+                ((LONG * dx / dy).max(8.0).ceil(), LONG)
+            };
+            let s = (bw / dx).min(bh / dy) * 0.92;
+            let (cx, cy) = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+            let saved = (d.camera.scale, d.camera.offset);
+            d.camera.scale = s;
+            d.camera.offset = (bw / 2.0 - cx * s, bh / 2.0 + cy * s);
+            let cmds = d.get_render_commands_in(0.0, 0.0, bw, bh);
+            d.camera.scale = saved.0;
+            d.camera.offset = saved.1;
+            (rev, bw as i32, bh as i32, print_prepare(cmds, true))
+        };
+        let (rev, bw, bh, cmds) = job;
+        t.borrow_mut().bd_pending = true;
+        let t2 = t.clone();
+        let canvas = t.borrow().canvas.upgrade();
+        glib::spawn_future_local(async move {
+            let res = gtk::gio::spawn_blocking(move || {
+                use gtk::cairo::{Context, Format, ImageSurface};
+                let mut surf = ImageSurface::create(Format::ARgb32, bw, bh).ok()?;
+                {
+                    let cr = Context::new(&surf).ok()?;
+                    CairoRenderer::new(&cr).draw_commands(cmds);
+                }
+                surf.flush();
+                let stride = surf.stride();
+                let data = surf.data().ok()?.to_vec();
+                Some((data, stride))
+            })
+            .await;
+            {
+                let mut tb = t2.borrow_mut();
+                tb.bd_pending = false;
+                tb.bd_key = Some(rev); // ตั้งแม้ล้มเหลว กันลองซ้ำทุกเฟรม
+                if let Ok(Some((data, stride))) = res {
+                    if let Ok(s) = gtk::cairo::ImageSurface::create_for_data(
+                        data,
+                        gtk::cairo::Format::ARgb32,
+                        bw,
+                        bh,
+                        stride,
+                    ) {
+                        tb.bd = Some(s);
+                    }
+                }
+            }
+            if let Some(c) = canvas {
+                c.queue_draw();
+            }
+        });
+    }
+
+    fn layout_draw(&self, t: &LayoutTab, cr: &gtk::cairo::Context, w: f64, h: f64) {
         cr.set_source_rgb(0.78, 0.78, 0.80);
         let _ = cr.paint();
         let (pw, ph) = t.dims();
         let v = t.view;
         let (x0, y0) = v.to_screen(0.0, 0.0);
+        // ฉากหลัง: ภาพเบลอของแบบ ขยาย/ขยับตามกระดาษแค่ ~35% เพื่อให้ดูมีมิติ
+        if t.bd_on {
+            if let Some(bd) = &t.bd {
+                let (bw, bh) = (bd.width() as f64, bd.height() as f64);
+                let (z0, c0x, c0y) = t.bd_ref;
+                let f = (v.z / z0.max(1e-9)).max(1e-3).powf(0.35);
+                let k = (w / bw).max(h / bh) * 0.9 * f;
+                let (pcx, pcy) = (v.ox + pw * v.z / 2.0, v.oy + ph * v.z / 2.0);
+                let (cx, cy) = (w / 2.0 + (pcx - c0x) * 0.35, h / 2.0 + (pcy - c0y) * 0.35);
+                let _ = cr.save();
+                cr.translate(cx, cy);
+                cr.scale(k, k);
+                cr.translate(-bw / 2.0, -bh / 2.0);
+                let _ = cr.set_source_surface(bd, 0.0, 0.0);
+                let _ = cr.paint_with_alpha(0.16);
+                let _ = cr.restore();
+            }
+        }
         cr.set_source_rgba(0.0, 0.0, 0.0, 0.25);
         cr.rectangle(x0 + 4.0, y0 + 4.0, pw * v.z, ph * v.z);
         let _ = cr.fill();
@@ -931,6 +1096,33 @@ impl DraftingWindow {
             let _ = cr.save();
             cr.rectangle(sx, sy, sw, sh);
             cr.clip();
+            let mut drawn = false;
+            let anim = t.vpa.as_ref().filter(|a| a.idx == i && a.matches(vp));
+            if let (Some(a), Some(p)) = (anim, src.as_ref()) {
+                if a.rec.borrow().is_none() {
+                    if let Some(cmds) = self.vp_commands(p, vp, t.mono) {
+                        if let Ok(rec) =
+                            gtk::cairo::RecordingSurface::create(gtk::cairo::Content::ColorAlpha, None)
+                        {
+                            if let Ok(rc) = gtk::cairo::Context::new(&rec) {
+                                rc.scale(PX_MM, PX_MM);
+                                CairoRenderer::new(&rc).draw_commands(cmds);
+                                *a.rec.borrow_mut() = Some(rec);
+                            }
+                        }
+                    }
+                }
+                if let Some(rec) = a.rec.borrow().as_ref() {
+                    let m = a.to_n / a.cur_n();
+                    cr.translate(sx + sw / 2.0, sy + sh / 2.0);
+                    cr.scale(v.z * m, v.z * m);
+                    cr.translate(-vp.w / 2.0, -vp.h / 2.0);
+                    let _ = cr.set_source_surface(rec, 0.0, 0.0);
+                    let _ = cr.paint();
+                    drawn = true;
+                }
+            }
+            if !drawn {
             match src.as_ref().and_then(|p| self.vp_commands(p, vp, t.mono)) {
                 Some(cmds) => {
                     cr.translate(sx, sy);
@@ -942,6 +1134,7 @@ impl DraftingWindow {
                     cr.move_to(sx + 8.0, sy + 20.0);
                     let _ = cr.show_text("Drawing not available");
                 }
+            }
             }
             let _ = cr.restore();
 
