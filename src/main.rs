@@ -27,6 +27,8 @@ mod renderer;
 mod blocks;
 mod linestyle;
 mod text;
+mod layout;
+mod hatch;
 
 use self::application::DraftingApplication;
 use self::window::DraftingWindow;

@@ -26,5 +26,7 @@
     <file>icons/line-extend-symbolic.svg</file>
     <file>icons/flip-h-symbolic.svg</file>
     <file>icons/layers-and-objects-symbolic.svg</file>
+    <file>icons/hatch-symbolic.svg</file>
+    <file>icons/text-t-symbolic.svg</file>
   </gresource>
 </gresources>

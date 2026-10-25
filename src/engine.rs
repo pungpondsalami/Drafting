@@ -5,6 +5,7 @@ use crate::spatial::SpatialIndex;
 use std::path::PathBuf;
 use std::f64::consts::{FRAC_PI_2, TAU};
 use crate::text::{self, HAlign, VAlign};
+use crate::hatch::{self, HatchSpec};
 
 pub const DEFAULT_DIMENSION_OFFSET: f64 = 30.0;
 
@@ -68,6 +69,8 @@ pub enum ToolMode {
     Trim,
     Extend,
     Mirror,
+    Hatch,
+    Text,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -161,6 +164,39 @@ pub struct DrawingElement {
     pub data: ElementData,
 }
 
+/// วัตถุที่ copy ไว้ (ข้ามแท็บได้): เก็บ layer ทั้งก้อนเพื่อสร้างให้ถ้าแบบปลายทางยังไม่มี
+#[derive(Debug, Clone)]
+pub struct ClipItem {
+    pub layer: Layer,
+    pub color: Option<Rgb>,
+    pub style: crate::linestyle::ElementStyle,
+    pub data: ElementData,
+}
+
+/// กรอบรวม (min_x, min_y, max_x, max_y) ของที่ copy ไว้
+pub fn clip_bounds(items: &[ClipItem]) -> Option<(f64, f64, f64, f64)> {
+    let mut r: Option<(f64, f64, f64, f64)> = None;
+    for it in items {
+        let el = DrawingElement {
+            id: 0,
+            is_selected: false,
+            layer: 0,
+            color: None,
+            style: Default::default(),
+            data: it.data.clone(),
+        };
+        let b = el.bounding_box();
+        if !(b.min_x.is_finite() && b.max_x.is_finite() && b.min_y.is_finite() && b.max_y.is_finite()) {
+            continue;
+        }
+        r = Some(match r {
+            None => (b.min_x, b.min_y, b.max_x, b.max_y),
+            Some((a, bb, c, d)) => (a.min(b.min_x), bb.min(b.min_y), c.max(b.max_x), d.max(b.max_y)),
+        });
+    }
+    r
+}
+
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     history: Vec<DrawingElement>,
@@ -178,6 +214,8 @@ pub enum ElementData {
     Polyline { points: Vec<Point>, closed: bool },
     /// พื้นที่ทึบ/hatch: หลาย loop (even-odd) filled=false → วาดแต่เส้นขอบ
     Fill { loops: Vec<Vec<Point>>, filled: bool },
+    /// Hatch ลายเส้น: loops (even-odd) + รูปแบบ; เส้นลายสร้างตอนวาด
+    Hatch { loops: Vec<Vec<Point>>, spec: HatchSpec },
     /// ข้อความ: pos = จุดยึด, height = ความสูงตัวพิมพ์ใหญ่, rotation เรเดียนทวนเข็ม,
     /// text ขึ้นบรรทัดใหม่ด้วย '\n', width > 0 = ตัดบรรทัดที่ความกว้างนี้ (MTEXT)
     Text {
@@ -214,11 +252,48 @@ impl ElementData {
                 pos.x += dx;
                 pos.y += dy;
             }
-            ElementData::Fill { loops, .. } => {
+            ElementData::Fill { loops, .. } | ElementData::Hatch { loops, .. } => {
                 for p in loops.iter_mut().flatten() {
                     p.x += dx;
                     p.y += dy;
                 }
+            }
+        }
+    }
+
+    /// ย่อ/ขยายรอบจุด c ด้วยตัวคูณ k > 0 (ความสูงตัวอักษร รัศมี ระยะ offset และระยะห่างลายก็คูณด้วย)
+    pub fn scale_about(&mut self, c: Point, k: f64) {
+        if !(k.is_finite() && k > 0.0) {
+            return;
+        }
+        let sp = |p: &mut Point| {
+            p.x = c.x + (p.x - c.x) * k;
+            p.y = c.y + (p.y - c.y) * k;
+        };
+        match self {
+            ElementData::Line { start, end } => {
+                sp(start);
+                sp(end);
+            }
+            ElementData::Dimension { start, end, offset } => {
+                sp(start);
+                sp(end);
+                *offset *= k;
+            }
+            ElementData::Circle { center, radius } | ElementData::Arc { center, radius, .. } => {
+                sp(center);
+                *radius *= k;
+            }
+            ElementData::Polyline { points, .. } => points.iter_mut().for_each(|p| sp(p)),
+            ElementData::Text { pos, height, width, .. } => {
+                sp(pos);
+                *height *= k;
+                *width *= k;
+            }
+            ElementData::Fill { loops, .. } => loops.iter_mut().flatten().for_each(|p| sp(p)),
+            ElementData::Hatch { loops, spec } => {
+                loops.iter_mut().flatten().for_each(|p| sp(p));
+                spec.spacing *= k;
             }
         }
     }
@@ -231,7 +306,7 @@ impl ElementData {
                 points.first().copied().unwrap_or(Point { x: 0.0, y: 0.0 })
             }
             ElementData::Text { pos, .. } => *pos,
-            ElementData::Fill { loops, .. } => loops
+            ElementData::Fill { loops, .. } | ElementData::Hatch { loops, .. } => loops
                 .iter()
                 .flatten()
                 .next()
@@ -279,6 +354,11 @@ impl ElementData {
             ElementData::Fill { loops, filled } => ElementData::Fill {
                 loops: loops.iter().map(|l| l.iter().map(r).collect()).collect(),
                 filled: *filled,
+            },
+            ElementData::Hatch { loops, spec } => ElementData::Hatch {
+                loops: loops.iter().map(|l| l.iter().map(r).collect()).collect(),
+                // เส้นลายที่ทำมุม θ สะท้อนข้ามแกนมุม φ จะเป็นมุม 2φ − θ
+                spec: HatchSpec { angle: 2.0 * phi - spec.angle, ..*spec },
             },
             ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
                 ElementData::Text {
@@ -477,7 +557,7 @@ impl DrawingElement {
             ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
                 text::bbox(*pos, *height, *rotation, text, *halign, *valign, *width)
             }
-            ElementData::Fill { loops, .. } => {
+            ElementData::Fill { loops, .. } | ElementData::Hatch { loops, .. } => {
                 let mut b = BoundingBox {
                     min_x: f64::MAX,
                     min_y: f64::MAX,
@@ -523,22 +603,19 @@ impl Camera {
         let lerp_factor = (dt * 10.0).min(1.0);
         let mut changed = false;
 
+        // scale กับ offset ต้องเดินพร้อมกันและหยุดพร้อมกันเสมอ
+        // (ซูมลึก offset มีค่าเป็นล้านพิกเซล ถ้า scale หยุดก่อน offset จะไถลต่อจนภาพส่าย)
         let scale_ratio = (self.scale / self.target_scale).ln().abs();
-        if scale_ratio > 0.00001 {
-            self.scale += (self.target_scale - self.scale) * lerp_factor;
-            changed = true;
-        } else {
-            self.scale = self.target_scale;
-        }
-
         let dx = self.target_offset.0 - self.offset.0;
         let dy = self.target_offset.1 - self.offset.1;
 
-        if dx.abs() > 0.01 || dy.abs() > 0.01 {
+        if scale_ratio > 0.00001 || dx.abs() > 0.01 || dy.abs() > 0.01 {
+            self.scale += (self.target_scale - self.scale) * lerp_factor;
             self.offset.0 += dx * lerp_factor;
             self.offset.1 += dy * lerp_factor;
             changed = true;
         } else {
+            self.scale = self.target_scale;
             self.offset = self.target_offset;
         }
 
@@ -628,6 +705,9 @@ pub struct Engine {
     /// เพิ่มทุกครั้งที่การเลือก/สไตล์ของวัตถุอาจเปลี่ยน (UI ใช้ดูว่าต้องอัปเดตไหม)
     pub sel_rev: u64,
     sel_bbox_cache: std::cell::Cell<(u64, usize, Option<(f64, f64, f64, f64)>)>,
+    /// Layout (paper space) ของแบบนี้ เก็บลง DXF; layout_rev เพิ่มทุกครั้งที่แก้ (ให้ autosave รู้)
+    pub layouts: Vec<crate::layout::LayoutSpec>,
+    pub layout_rev: u64,
     /// กำลังลากย้าย: index ยังเป็นของตำแหน่งเดิม; moving = id ที่ต้องวาดเสมอ
     moving: Vec<u64>,
     index_stale: bool,
@@ -656,6 +736,8 @@ impl Engine {
             skipped: 0,
             sel_rev: 0,
             sel_bbox_cache: std::cell::Cell::new((u64::MAX, 0, None)),
+            layouts: Vec::new(),
+            layout_rev: 0,
             moving: Vec::new(),
             index_stale: false,
             zoom_cap_key: (usize::MAX, 0),
@@ -724,7 +806,7 @@ impl Engine {
         let i = self.index_of(id)?;
         if matches!(
             self.history[i].data,
-            ElementData::Dimension { .. } | ElementData::Fill { .. } | ElementData::Text { .. }
+            ElementData::Dimension { .. } | ElementData::Fill { .. } | ElementData::Hatch { .. } | ElementData::Text { .. }
         ) {
             return None;
         }
@@ -1255,7 +1337,7 @@ impl Engine {
                                 color: (1.0, 1.0, 1.0),
                             });
                         }
-                        ElementData::Dimension { .. } => {
+                        ElementData::Dimension { .. } | ElementData::Hatch { .. } => {
                             // Skip dimension in array preview for now
                         }
                         ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
@@ -1324,6 +1406,53 @@ impl Engine {
         };
     }
 
+    /// Copy: ทำสำเนาวัตถุที่เลือก (ไม่แตะแบบ)
+    pub fn copy_selected(&self) -> Vec<ClipItem> {
+        self.history
+            .iter()
+            .filter(|e| e.is_selected)
+            .map(|e| ClipItem {
+                layer: self.layers[e.layer].clone(),
+                color: e.color,
+                style: e.style.clone(),
+                data: e.data.clone(),
+            })
+            .collect()
+    }
+
+    /// Paste: วางสำเนาเลื่อน (dx, dy) แล้วเลือกชิ้นที่วาง; layer ชื่อเดียวกันใช้ของเดิม ไม่มีก็สร้าง
+    pub fn paste_items(&mut self, items: &[ClipItem], dx: f64, dy: f64) -> usize {
+        if items.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        for el in &mut self.history {
+            el.is_selected = false;
+        }
+        for it in items {
+            let li = match self.layers.iter().position(|l| l.name.eq_ignore_ascii_case(&it.layer.name)) {
+                Some(i) => i,
+                None => {
+                    self.layers.push(it.layer.clone());
+                    self.layers.len() - 1
+                }
+            };
+            let mut data = it.data.clone();
+            data.translate(dx, dy);
+            let id = self.get_next_id();
+            self.add_element(DrawingElement {
+                id,
+                is_selected: true,
+                layer: li,
+                color: it.color,
+                style: it.style.clone(),
+                data,
+            });
+        }
+        self.sel_rev += 1;
+        items.len()
+    }
+
     pub fn get_next_id(&mut self) -> u64 {
         self.id_counter += 1;
         self.id_counter
@@ -1347,6 +1476,203 @@ impl Engine {
             data,
         });
         id
+    }
+
+    // ---------------- Hatch / Text ----------------
+
+    /// หาพื้นที่ปิดที่ครอบจุด (wx, wy) จากเส้น วงกลม ส่วนโค้ง polyline ของวัตถุที่มองเห็น
+    pub fn hatch_region(&self, wx: f64, wy: f64) -> Result<hatch::Region, &'static str> {
+        let Some(root) = self.spatial_index.get_root_bounds() else {
+            return Err("Nothing to hatch");
+        };
+        let diag = (root.max_x - root.min_x).hypot(root.max_y - root.min_y);
+        let eps = (diag * 1e-9).max(1e-7);
+
+        // เส้นของแต่ละวัตถุ (แคช) + index ย่อยสำหรับวัตถุที่มีหลายเส้น (polyline ยาว ๆ)
+        let mut cache: std::collections::HashMap<
+            u64,
+            (Vec<hatch::Seg>, Option<SpatialIndex<usize>>),
+        > = std::collections::HashMap::new();
+        let mut fetch = |bb: &BoundingBox| -> Vec<hatch::Seg> {
+            let mut hits = Vec::new();
+            self.spatial_index.query(bb, &mut hits);
+            let ids: Vec<u64> = hits.into_iter().copied().collect();
+            let mut out = Vec::new();
+            for id in ids {
+                let ent = cache.entry(id).or_insert_with(|| {
+                    let mut v = Vec::new();
+                    if let Some(i) = self.index_of(id) {
+                        if self.layer_visible(i) {
+                            hatch::element_segs(id, &self.history[i].data, &mut v);
+                        }
+                    }
+                    let tree = if v.len() > 64 {
+                        let mut t = SpatialIndex::new(8);
+                        for (k, s) in v.iter().enumerate() {
+                            t.insert(k, s.bbox());
+                        }
+                        Some(t)
+                    } else {
+                        None
+                    };
+                    (v, tree)
+                });
+                match &ent.1 {
+                    Some(t) => {
+                        let mut near = Vec::new();
+                        t.query(bb, &mut near);
+                        for k in near {
+                            let s = ent.0[*k];
+                            if s.bbox().intersects(bb) {
+                                out.push(s);
+                            }
+                        }
+                    }
+                    None => out.extend(ent.0.iter().filter(|s| s.bbox().intersects(bb)).copied()),
+                }
+            }
+            out
+        };
+        let mut region = hatch::find_region(&mut fetch, Point { x: wx, y: wy }, &root, eps)?;
+
+        // เกาะที่เป็นวงกลม / polyline ปิด อยู่ข้างในทั้งหมดแต่รังสีไม่โดน
+        let mut ob = BoundingBox {
+            min_x: f64::MAX,
+            min_y: f64::MAX,
+            max_x: f64::MIN,
+            max_y: f64::MIN,
+        };
+        for p in &region.outer {
+            ob.min_x = ob.min_x.min(p.x);
+            ob.min_y = ob.min_y.min(p.y);
+            ob.max_x = ob.max_x.max(p.x);
+            ob.max_y = ob.max_y.max(p.y);
+        }
+        let mut hits = Vec::new();
+        self.spatial_index.query(&ob, &mut hits);
+        let mut ids: Vec<u64> = hits.into_iter().copied().collect();
+        ids.sort_unstable();
+        let mut added = 0;
+        for id in ids {
+            if added >= 500 {
+                break;
+            }
+            if region.used.contains(&id) {
+                continue;
+            }
+            let Some(i) = self.index_of(id) else { continue };
+            if !self.layer_visible(i) {
+                continue;
+            }
+            let pts: Vec<Point> = match &self.history[i].data {
+                ElementData::Circle { center, radius } if *radius > eps => {
+                    hatch::circle_points(*center, *radius)
+                }
+                ElementData::Polyline { points, closed: true } if points.len() >= 3 => points.clone(),
+                _ => continue,
+            };
+            if pts.iter().all(|p| hatch::point_in_poly(*p, &region.outer)) {
+                region.holes.push(pts);
+                added += 1;
+            }
+        }
+        Ok(region)
+    }
+
+    /// สร้าง hatch (solid = Fill ทึบ) ในพื้นที่ปิดที่ครอบจุดนี้
+    pub fn hatch_at(
+        &mut self,
+        wx: f64,
+        wy: f64,
+        spec: HatchSpec,
+        solid: bool,
+    ) -> Result<u64, &'static str> {
+        if !solid && !(spec.spacing > 0.0 && spec.spacing.is_finite() && spec.angle.is_finite()) {
+            return Err("Hatch spacing must be greater than 0");
+        }
+        self.finish_move();
+        let region = self.hatch_region(wx, wy)?;
+        let mut loops = vec![region.outer];
+        loops.extend(region.holes);
+        self.checkpoint();
+        let data = if solid {
+            ElementData::Fill { loops, filled: true }
+        } else {
+            ElementData::Hatch { loops, spec }
+        };
+        Ok(self.push_new(data))
+    }
+
+    /// แก้รูปแบบ hatch (คืน false ถ้าไม่ใช่ hatch)
+    pub fn set_hatch_spec(&mut self, id: u64, new: HatchSpec) -> bool {
+        let Some(i) = self.index_of(id) else { return false };
+        match &self.history[i].data {
+            ElementData::Hatch { spec, .. } if *spec == new => return true,
+            ElementData::Hatch { .. } => {}
+            _ => return false,
+        }
+        if !(new.spacing > 0.0 && new.spacing.is_finite() && new.angle.is_finite()) {
+            return false;
+        }
+        self.checkpoint();
+        if let ElementData::Hatch { spec, .. } = &mut self.history[i].data {
+            *spec = new;
+        }
+        true
+    }
+
+    /// เพิ่มข้อความ (หลายบรรทัด → ยึดมุมซ้ายบน, บรรทัดเดียว → ยึดเส้นฐานซ้าย)
+    pub fn add_text(&mut self, pos: Point, text: String, height: f64, rotation: f64) -> Option<u64> {
+        if text.trim().is_empty() || !(height > 0.0 && height.is_finite()) || !rotation.is_finite() {
+            return None;
+        }
+        let valign = if text.contains('\n') { VAlign::Top } else { VAlign::Baseline };
+        self.checkpoint();
+        Some(self.push_new(ElementData::Text {
+            pos,
+            height,
+            rotation,
+            text,
+            halign: HAlign::Left,
+            valign,
+            width: 0.0,
+        }))
+    }
+
+    /// แก้ข้อความ ความสูง และมุมของ Text (คืน false ถ้าไม่ใช่ Text หรือค่าไม่ถูกต้อง)
+    pub fn set_text(&mut self, id: u64, new_text: String, new_height: f64, new_rot: f64) -> bool {
+        let Some(i) = self.index_of(id) else { return false };
+        if !matches!(self.history[i].data, ElementData::Text { .. })
+            || new_text.trim().is_empty()
+            || !(new_height > 0.0 && new_height.is_finite())
+            || !new_rot.is_finite()
+        {
+            return false;
+        }
+        self.checkpoint();
+        if let ElementData::Text { text, height, rotation, .. } = &mut self.history[i].data {
+            *text = new_text;
+            *height = new_height;
+            *rotation = new_rot;
+        }
+        self.rebuild_index();
+        true
+    }
+
+    /// วัตถุที่แก้ไขได้ (Text / Hatch) ใต้จุดนี้ สำหรับดับเบิลคลิก
+    pub fn edit_target(&mut self, wx: f64, wy: f64) -> Option<(u64, ElementData)> {
+        self.hover_at(wx, wy);
+        let id = self.hovered_id?;
+        let i = self.index_of(id)?;
+        match &self.history[i].data {
+            d @ (ElementData::Text { .. } | ElementData::Hatch { .. }) => Some((id, d.clone())),
+            _ => None,
+        }
+    }
+
+    /// ทิ้ง checkpoint ล่าสุด (ใช้เมื่อขึ้นต้นการย้ายไปแล้วแต่ไม่ได้ขยับ)
+    pub fn discard_last_checkpoint(&mut self) {
+        self.undo_stack.pop();
     }
 
     pub fn push_imported(
@@ -1885,6 +2211,7 @@ impl Engine {
                     }
                 }
                 ElementData::Text { pos, .. } => consider(*pos, SnapKind::Endpoint),
+                ElementData::Hatch { .. } => {}
                 ElementData::Fill { loops, .. } => {
                     for p in loops.iter().flatten().take(256) {
                         consider(*p, SnapKind::Endpoint);
@@ -2134,6 +2461,55 @@ impl Engine {
                         color: col,
                     });
                 }
+                ElementData::Hatch { loops, spec } => {
+                    let bb = el.bounding_box();
+                    if (bb.max_x - bb.min_x) * self.camera.scale < 1.0
+                        && (bb.max_y - bb.min_y) * self.camera.scale < 1.0
+                    {
+                        continue;
+                    }
+                    // เส้นลายถี่กว่า 3 px มองไม่ออก → วาดทึบแทน
+                    let lines = if spec.spacing * self.camera.scale >= 3.0 {
+                        hatch::pattern_segments(loops, spec, Some(&viewport_bounds))
+                    } else {
+                        None
+                    };
+                    match lines {
+                        Some(lines) => {
+                            let st = ((self.pen_style(el).0 * 0.5).max(1.0), Vec::new());
+                            if st != last_style {
+                                commands.push(RenderCommand::Style { lw: st.0, dash: st.1.clone() });
+                                last_style = st;
+                            }
+                            for (a, b) in lines {
+                                let s = self.camera.world_to_screen(a.x, a.y);
+                                let e = self.camera.world_to_screen(b.x, b.y);
+                                commands.push(RenderCommand::Line {
+                                    x1: s.0,
+                                    y1: s.1,
+                                    x2: e.0,
+                                    y2: e.1,
+                                    is_selected: el.is_selected,
+                                    color: col,
+                                });
+                            }
+                        }
+                        None => {
+                            let loops = loops
+                                .iter()
+                                .map(|l| {
+                                    l.iter().map(|p| self.camera.world_to_screen(p.x, p.y)).collect()
+                                })
+                                .collect();
+                            commands.push(RenderCommand::Fill {
+                                loops,
+                                filled: true,
+                                is_selected: el.is_selected,
+                                color: col,
+                            });
+                        }
+                    }
+                }
                 ElementData::Fill { loops, filled } => {
                     let bb = el.bounding_box();
                     if (bb.max_x - bb.min_x) * self.camera.scale < 1.0
@@ -2355,7 +2731,7 @@ fn prims(d: &ElementData) -> Vec<Prim> {
             let segs = if *closed { n } else { n.saturating_sub(1) };
             (0..segs).map(|i| Prim::Seg(points[i], points[(i + 1) % n])).collect()
         }
-        ElementData::Dimension { .. } | ElementData::Fill { .. } | ElementData::Text { .. } => vec![],
+        ElementData::Dimension { .. } | ElementData::Fill { .. } | ElementData::Hatch { .. } | ElementData::Text { .. } => vec![],
     }
 }
 
@@ -2555,6 +2931,7 @@ fn offset_data(data: &ElementData, side: Point, dist: f64) -> Result<ElementData
         }),
         ElementData::Dimension { .. } => Err("Dimensions can't be offset"),
         ElementData::Fill { .. } => Err("Filled shapes can't be offset"),
+        ElementData::Hatch { .. } => Err("Hatches can't be offset"),
         ElementData::Text { .. } => Err("Text can't be offset"),
     }
 }
@@ -2594,6 +2971,8 @@ impl ElementData {
             ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
                 text::edge_distance(p, *pos, *height, *rotation, text, *halign, *valign, *width)
             }
+            // คลิกใกล้เส้นขอบต้องได้เส้นก่อน: hatch เลือกได้เฉพาะคลิกข้างใน (ดู fill_contains)
+            ElementData::Hatch { .. } => f64::MAX,
             ElementData::Fill { loops, .. } => loops
                 .iter()
                 .map(|l| dist_to_loop(p, l))
@@ -2605,6 +2984,7 @@ impl ElementData {
     pub fn fill_contains(&self, p: Point) -> bool {
         match self {
             ElementData::Fill { loops, filled: true } => point_in_loops(p, loops),
+            ElementData::Hatch { loops, .. } => point_in_loops(p, loops),
             ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
                 text::contains(p, *pos, *height, *rotation, text, *halign, *valign, *width)
             }
@@ -2657,6 +3037,17 @@ impl ElementData {
                 let centre = Point { x: (r.min_x + r.max_x) / 2.0, y: (r.min_y + r.max_y) / 2.0 };
                 (0..4).any(|i| seg_hits_rect(c[i], c[(i + 1) % 4], r))
                     || text::contains(centre, *pos, *height, *rotation, text, *halign, *valign, *width)
+            }
+            ElementData::Hatch { loops, .. } => {
+                let edge_hit = loops.iter().any(|l| {
+                    let n = l.len();
+                    n >= 2 && (0..n).any(|i| seg_hits_rect(l[i], l[(i + 1) % n], r))
+                });
+                edge_hit
+                    || point_in_loops(
+                        Point { x: (r.min_x + r.max_x) / 2.0, y: (r.min_y + r.max_y) / 2.0 },
+                        loops,
+                    )
             }
             ElementData::Fill { loops, filled } => {
                 let edge_hit = loops.iter().any(|l| {
@@ -2825,6 +3216,7 @@ fn trim_data(
         ElementData::Polyline { points, closed } => trim_polyline(points, *closed, click, cutters),
         ElementData::Dimension { .. } => Err("Dimensions can't be trimmed"),
         ElementData::Fill { .. } => Err("Filled shapes can't be trimmed"),
+        ElementData::Hatch { .. } => Err("Hatches can't be trimmed"),
         ElementData::Text { .. } => Err("Text can't be trimmed"),
     }
 }
@@ -2907,6 +3299,7 @@ fn extend_data(
         ElementData::Polyline { points, closed } => extend_polyline(points, *closed, click, cutters, reach),
         ElementData::Dimension { .. } => Err("Dimensions can't be extended"),
         ElementData::Fill { .. } => Err("Filled shapes can't be extended"),
+        ElementData::Hatch { .. } => Err("Hatches can't be extended"),
         ElementData::Text { .. } => Err("Text can't be extended"),
     }
 }
@@ -3172,7 +3565,7 @@ fn sample_target(data: &ElementData) -> Vec<Point> {
             .map(|i| arc_point(*center, *radius, start_angle + (end_angle - start_angle) * i as f64 / 64.0))
             .collect(),
         ElementData::Polyline { points, .. } => points.clone(),
-        ElementData::Dimension { .. } | ElementData::Fill { .. } | ElementData::Text { .. } => vec![],
+        ElementData::Dimension { .. } | ElementData::Fill { .. } | ElementData::Hatch { .. } | ElementData::Text { .. } => vec![],
     }
 }
 

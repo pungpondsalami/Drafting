@@ -31,6 +31,7 @@ use std::cell::RefCell;
 use crate::renderer::{CairoRenderer, Renderer};
 use std::path::PathBuf;
 use std::rc::Rc;
+use crate::hatch::{HatchKind, HatchSpec};
 
 glib::wrapper! {
     pub struct DraftingWindow(ObjectSubclass<imp::DraftingWindow>)
@@ -61,6 +62,8 @@ pub struct OffsetAnim {
     pub start_us: Option<i64>,
     pub t: f64, // 0.0 → 1.0
 }
+
+mod layout_ui;
 
 mod imp {
     use super::*;
@@ -132,6 +135,8 @@ mod imp {
         #[template_child]
         pub btn_polyline: TemplateChild<gtk::Button>,
         #[template_child]
+        pub btn_layout: TemplateChild<gtk::Button>,
+        #[template_child]
         pub btn_select: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_offset: TemplateChild<gtk::Button>,
@@ -151,6 +156,18 @@ mod imp {
         pub btn_extend: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_mirror: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_hatch: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_text: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub revealer_hatch: TemplateChild<gtk::Revealer>,
+        #[template_child]
+        pub dd_hatch_pattern: TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub spin_hatch_angle: TemplateChild<gtk::SpinButton>,
+        #[template_child]
+        pub spin_hatch_spacing: TemplateChild<gtk::SpinButton>,
         #[template_child]
         pub btn_layers: TemplateChild<gtk::ToggleButton>,
         #[template_child]
@@ -203,6 +220,13 @@ mod imp {
         pub mirror_anim: RefCell<Option<MirrorAnim>>,
         pub ortho: Cell<bool>,
         pub cursor_size: Cell<f64>,
+        /// เซฟสำรองอัตโนมัติ: id ไฟล์สำรองของแต่ละแท็บ + สถานะที่เซฟล่าสุด
+        pub autosave_ids: RefCell<HashMap<adw::TabPage, String>>,
+        pub autosave_keys: RefCell<HashMap<adw::TabPage, (usize, usize, u64, u64)>>,
+        /// ตัวเลือกกล่องพิมพ์ล่าสุด (กระดาษ, แนว, พื้นที่, สเกล, สี)
+        pub print_opts: Cell<(u32, u32, u32, u32, u32)>,
+        /// ความสูงตัวอักษรที่ใช้ครั้งล่าสุด (0 = ยังไม่เคย)
+        pub text_height: Cell<f64>,
         /// จุดจับ (snap แล้ว) ตอนเริ่มย้าย และระยะที่ย้ายไปแล้ว
         pub move_base: Cell<Option<(f64, f64)>>,
         pub move_applied: Cell<(f64, f64)>,
@@ -265,6 +289,11 @@ mod imp {
                     let is_shift = state.contains(gdk::ModifierType::SHIFT_MASK);
                     let typing = obj.is_typing();
 
+                    // กล่องโต้ตอบเปิดอยู่ (เช่น กล่องพิมพ์ข้อความ): ปล่อยคีย์ให้กล่องจัดการเอง
+                    if obj.imp().is_dialog_open.get() {
+                        return glib::Propagation::Proceed;
+                    }
+
                     // Space ค้าง + ลากเมาส์ = เลื่อน canvas
                     if key == gdk::Key::space && !typing && !is_ctrl {
                         obj.imp().space_down.set(true);
@@ -316,6 +345,11 @@ mod imp {
                         && !obj.imp().pending_points.borrow().is_empty()
                     {
                         obj.finish_polyline();
+                        return glib::Propagation::Stop;
+                    }
+
+                    // แท็บ Layout: Delete / Esc จัดการเอง
+                    if obj.layout_key(key) {
                         return glib::Propagation::Stop;
                     }
 
@@ -372,6 +406,8 @@ mod imp {
                             gdk::Key::o | gdk::Key::O => Some(DrawingMode::Offset),
                             gdk::Key::t | gdk::Key::T => Some(DrawingMode::Trim),
                             gdk::Key::e | gdk::Key::E => Some(DrawingMode::Extend),
+                            gdk::Key::h | gdk::Key::H => Some(DrawingMode::Hatch),
+                            gdk::Key::x | gdk::Key::X => Some(DrawingMode::Text),
                             _ => None,
                         };
                         if let Some(mode) = tool {
@@ -393,8 +429,27 @@ mod imp {
                         }
                         return glib::Propagation::Stop;
                     }
+                    // Copy / Cut / Paste (Ctrl+Shift+V = วางที่พิกัดเดิม)
+                    if is_ctrl && !typing {
+                        if key == gdk::Key::c || key == gdk::Key::C {
+                            obj.copy_action();
+                            return glib::Propagation::Stop;
+                        }
+                        if key == gdk::Key::x || key == gdk::Key::X {
+                            obj.cut_action();
+                            return glib::Propagation::Stop;
+                        }
+                        if key == gdk::Key::v || key == gdk::Key::V {
+                            obj.paste_action(is_shift);
+                            return glib::Propagation::Stop;
+                        }
+                    }
                     if is_ctrl && (key == gdk::Key::o || key == gdk::Key::O) {
                         obj.show_open_dialog();
+                        return glib::Propagation::Stop;
+                    }
+                    if is_ctrl && (key == gdk::Key::p || key == gdk::Key::P) {
+                        obj.show_print_dialog();
                         return glib::Propagation::Stop;
                     }
 
@@ -626,6 +681,20 @@ mod imp {
                 }
             ));
 
+            self.btn_layout.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.layout_command()
+            ));
+
+            let layout_action = gtk::gio::SimpleAction::new("layout", None);
+            layout_action.connect_activate(glib::clone!(
+                #[weak]
+                obj,
+                move |_, _| obj.layout_command()
+            ));
+            obj.add_action(&layout_action);
+
             self.btn_line.connect_clicked(glib::clone!(
                 #[weak]
                 obj,
@@ -802,6 +871,18 @@ mod imp {
                 move |_| obj.set_tool(DrawingMode::Mirror)
             ));
 
+            self.btn_hatch.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Hatch)
+            ));
+
+            self.btn_text.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Text)
+            ));
+
             self.btn_delete.connect_clicked(glib::clone!(
                 #[weak]
                 obj,
@@ -895,11 +976,18 @@ mod imp {
                             "save" => obj.save_action(),
                             "saveas" => obj.save_as_action(),
                             "o" | "open" => obj.show_open_dialog(),
+                            "print" | "plot" => obj.show_print_dialog(),
+                            "layout" | "lay" => obj.layout_command(),
+                            "copy" => obj.copy_action(),
+                            "cut" => obj.cut_action(),
+                            "paste" => obj.paste_action(false),
                             "a" | "arc" => obj.set_tool(DrawingMode::Arc),
                             "pl" | "pline" | "polyline" => obj.set_tool(DrawingMode::Polyline),
                             "tr" | "trim" => obj.set_tool(DrawingMode::Trim),
                             "ex" | "extend" => obj.set_tool(DrawingMode::Extend),
                             "mi" | "mirror" => obj.set_tool(DrawingMode::Mirror),
+                            "h" | "hatch" => obj.set_tool(DrawingMode::Hatch),
+                            "tx" | "text" => obj.set_tool(DrawingMode::Text),
                             "del" | "delete" | "erase" => obj.delete_action(),
                             "la" | "layer" | "layers" => {
                                 let b = &obj.imp().btn_layers;
@@ -948,7 +1036,10 @@ mod imp {
             self.tab_view.connect_selected_page_notify(glib::clone!(
                 #[weak]
                 obj,
-                move |_| obj.refresh_layers()
+                move |_| {
+                    obj.refresh_layers();
+                    obj.sync_layout_chrome();
+                }
             ));
 
             self.layer_list.connect_row_selected(glib::clone!(
@@ -994,6 +1085,17 @@ mod imp {
 
             // สร้างหน้าแรกทันที
             obj.create_new_tab("Drawing 1");
+
+            // เซฟสำรองทุก 2 นาที + ถามกู้คืนถ้าครั้งก่อนปิดผิดปกติ
+            obj.start_autosave();
+            glib::timeout_add_local_once(
+                std::time::Duration::from_millis(600),
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    move || obj.check_recovery()
+                ),
+            );
 
             self.btn_line.connect_clicked(glib::clone!(
                 #[weak]
@@ -1115,6 +1217,7 @@ impl DraftingWindow {
             return;
         }
         imp.synced_mode.set(Some(mode));
+        imp.revealer_hatch.set_reveal_child(mode == DrawingMode::Hatch);
 
         let offset_page_shown =
             imp.right_dock.visible_child_name().as_deref() == Some("offset_settings");
@@ -1156,7 +1259,7 @@ impl DraftingWindow {
             }
         }
 
-        let buttons: [(&gtk::Button, DrawingMode); 11] = [
+        let buttons: [(&gtk::Button, DrawingMode); 13] = [
             (&imp.btn_select, DrawingMode::Select),
             (&imp.btn_line, DrawingMode::Line),
             (&imp.btn_circle, DrawingMode::Circle),
@@ -1168,6 +1271,8 @@ impl DraftingWindow {
             (&imp.btn_trim, DrawingMode::Trim),
             (&imp.btn_extend, DrawingMode::Extend),
             (&imp.btn_mirror, DrawingMode::Mirror),
+            (&imp.btn_hatch, DrawingMode::Hatch),
+            (&imp.btn_text, DrawingMode::Text),
         ];
 
         for (btn, m) in buttons {
@@ -1924,6 +2029,31 @@ impl DraftingWindow {
                             }
                         }
 
+                        DrawingMode::Hatch => {
+                            let (spec, solid) = obj.hatch_ui_spec();
+                            match d.hatch_at(wx, wy, spec, solid) {
+                                Ok(_) => imp.offset_msg.borrow_mut().clear(),
+                                Err(m) => *imp.offset_msg.borrow_mut() = m.into(),
+                            }
+                        }
+
+                        DrawingMode::Text => {
+                            let (sx, sy, _) = d.get_input_snap(
+                                wx,
+                                wy,
+                                imp.snap_enabled.get(),
+                                &imp.snap_settings.get(),
+                            );
+                            let at = Point { x: sx, y: sy };
+                            let scale = d.camera.scale;
+                            // เปิดกล่องหลังจบการจัดการคลิกนี้ (ตอนนี้ engine ยังถูกยืมอยู่)
+                            glib::idle_add_local_once(glib::clone!(
+                                #[weak]
+                                obj,
+                                move || obj.prompt_new_text(at, scale)
+                            ));
+                        }
+
                         DrawingMode::Move => {}
                     }
                 }
@@ -2026,6 +2156,29 @@ impl DraftingWindow {
             }
         ));
         canvas.add_controller(click);
+
+        // --- 4b. ดับเบิลคลิก: แก้ Text / Hatch ---
+        let dbl = gtk::GestureClick::builder().button(1).build();
+        dbl.connect_pressed(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            #[weak]
+            page,
+            move |_, n_press, x, y| {
+                if n_press != 2 {
+                    return;
+                }
+                // ให้ตัวจัดการคลิกหลักทำงานจบก่อน (มันอาจเริ่มโหมดย้ายไปแล้ว)
+                glib::idle_add_local_once(glib::clone!(
+                    #[weak]
+                    obj,
+                    #[weak]
+                    page,
+                    move || obj.edit_at(&page, x, y)
+                ));
+            }
+        ));
+        canvas.add_controller(dbl);
 
         // --- 5. Draw Function ---
         let state: std::rc::Rc<RefCell<SceneState>> =
@@ -2243,6 +2396,7 @@ impl DraftingWindow {
                 DrawingMode::Arc | DrawingMode::Polyline | DrawingMode::Offset => {}
                 DrawingMode::Trim => {}
                 DrawingMode::Extend => {}
+                DrawingMode::Hatch | DrawingMode::Text => {}
                 DrawingMode::Mirror => {
                     let (psx, psy) = cam.world_to_screen(sx, sy);
                     let (pex, pey) = cam.world_to_screen(sn_x, sn_y);
@@ -2650,9 +2804,20 @@ impl DraftingWindow {
             DrawingMode::Trim => "TRIM",
             DrawingMode::Extend => "EXTEND",
             DrawingMode::Mirror => "MIRROR",
+            DrawingMode::Hatch => "HATCH",
+            DrawingMode::Text => "TEXT",
         };
 
-        let offset_hint = if imp.current_mode.get() == DrawingMode::Mirror {
+        let offset_hint = if imp.current_mode.get() == DrawingMode::Hatch {
+            let msg = imp.offset_msg.borrow();
+            if msg.is_empty() {
+                "  click inside a closed area".to_string()
+            } else {
+                format!("  click inside a closed area | {}", msg)
+            }
+        } else if imp.current_mode.get() == DrawingMode::Text {
+            "  click where the text goes".to_string()
+        } else if imp.current_mode.get() == DrawingMode::Mirror {
             if imp.start_pos.get().is_none() {
                 "  click first point of mirror line".to_string()
             } else {
@@ -2743,7 +2908,7 @@ impl DraftingWindow {
     /// โฟกัสอยู่ในช่องที่รับข้อความ (ช่องคำสั่ง, spin ของ Array) หรือไม่
     fn is_typing(&self) -> bool {
         gtk::prelude::GtkWindowExt::focus(self)
-            .map_or(false, |w| w.is::<gtk::Editable>())
+            .map_or(false, |w| w.is::<gtk::Editable>() || w.is::<gtk::TextView>())
     }
 
     fn sync_snap_settings(&self) {
@@ -2758,6 +2923,653 @@ impl DraftingWindow {
         if let Some(page) = imp.tab_view.selected_page() {
             page.child().queue_draw();
         }
+    }
+
+    // ---------------- Hatch / Text ----------------
+
+    /// ค่าจากแผง Hatch: (รูปแบบ, solid?)  ตัวเลือก 0 = Lines, 1 = Cross, 2 = Solid
+    fn hatch_ui_spec(&self) -> (HatchSpec, bool) {
+        let imp = self.imp();
+        imp.spin_hatch_angle.update();
+        imp.spin_hatch_spacing.update();
+        let sel = imp.dd_hatch_pattern.selected();
+        let kind = if sel == 1 { HatchKind::Cross } else { HatchKind::Lines };
+        let spec = HatchSpec {
+            kind,
+            angle: imp.spin_hatch_angle.value().to_radians(),
+            spacing: imp.spin_hatch_spacing.value(),
+        };
+        (spec, sel == 2)
+    }
+
+    /// กล่องพิมพ์ข้อความ (หลายบรรทัด) + ความสูง + มุมหมุน (องศา); init = (ข้อความ, สูง, มุม°)
+    fn show_text_dialog(
+        &self,
+        heading: &str,
+        init: (String, f64, f64),
+        on_ok: impl Fn(String, f64, f64) + 'static,
+    ) {
+        let imp = self.imp();
+        let dialog = adw::AlertDialog::new(Some(heading), None);
+        dialog.add_responses(&[("cancel", "_Cancel"), ("ok", "_OK")]);
+        dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+        dialog.set_close_response("cancel");
+
+        let tv = gtk::TextView::builder()
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .accepts_tab(false)
+            .left_margin(8)
+            .right_margin(8)
+            .top_margin(6)
+            .bottom_margin(6)
+            .build();
+        tv.buffer().set_text(&init.0);
+        let sw = gtk::ScrolledWindow::builder()
+            .min_content_height(110)
+            .min_content_width(380)
+            .has_frame(true)
+            .child(&tv)
+            .build();
+
+        let height = gtk::SpinButton::with_range(0.001, 100000.0, 1.0);
+        height.set_digits(3);
+        height.set_value(init.1);
+        let rot = gtk::SpinButton::with_range(-360.0, 360.0, 5.0);
+        rot.set_digits(1);
+        rot.set_value(init.2);
+
+        let lbl = |s: &str| gtk::Label::builder().label(s).xalign(0.0).build();
+        let row = gtk::Box::builder().spacing(10).build();
+        row.append(&lbl("Height"));
+        row.append(&height);
+        row.append(&lbl("Rotation (°)"));
+        row.append(&rot);
+        let bx = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(10)
+            .build();
+        bx.append(&sw);
+        bx.append(&row);
+        dialog.set_extra_child(Some(&bx));
+
+        imp.is_dialog_open.set(true);
+        dialog.connect_closed(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                obj.imp().is_dialog_open.set(false);
+                if let Some(page) = obj.imp().tab_view.selected_page() {
+                    page.child().grab_focus();
+                }
+            }
+        ));
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[strong]
+                tv,
+                #[strong]
+                height,
+                #[strong]
+                rot,
+                move |_, response| {
+                    if response != "ok" {
+                        return;
+                    }
+                    height.update();
+                    rot.update();
+                    let buf = tv.buffer();
+                    let text = buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string();
+                    let text = text.trim_end().to_string();
+                    if text.trim().is_empty() {
+                        return;
+                    }
+                    on_ok(text, height.value(), rot.value());
+                }
+            ),
+        );
+        dialog.present(Some(self));
+        glib::idle_add_local_once(move || {
+            tv.grab_focus();
+        });
+    }
+
+    /// กล่องแก้ hatch ที่มีอยู่: รูปแบบ มุม ระยะห่าง
+    fn show_hatch_dialog(&self, init: HatchSpec, on_ok: impl Fn(HatchSpec) + 'static) {
+        let imp = self.imp();
+        let dialog = adw::AlertDialog::new(Some("Edit hatch"), None);
+        dialog.add_responses(&[("cancel", "_Cancel"), ("ok", "_OK")]);
+        dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("ok"));
+        dialog.set_close_response("cancel");
+
+        let dd = gtk::DropDown::new(
+            Some(gtk::StringList::new(&["Lines", "Cross"])),
+            gtk::Expression::NONE,
+        );
+        dd.set_selected(if init.kind == HatchKind::Cross { 1 } else { 0 });
+        let mut deg = init.angle.to_degrees() % 360.0;
+        if deg > 180.0 {
+            deg -= 360.0;
+        }
+        if deg <= -180.0 {
+            deg += 360.0;
+        }
+        let ang = gtk::SpinButton::with_range(-360.0, 360.0, 5.0);
+        ang.set_digits(1);
+        ang.set_value(deg);
+        let sp = gtk::SpinButton::with_range(0.001, 100000.0, 1.0);
+        sp.set_digits(3);
+        sp.set_value(init.spacing);
+
+        let lbl = |s: &str| gtk::Label::builder().label(s).xalign(0.0).build();
+        let grid = gtk::Grid::builder()
+            .column_spacing(12)
+            .row_spacing(8)
+            .halign(gtk::Align::Center)
+            .build();
+        grid.attach(&lbl("Pattern"), 0, 0, 1, 1);
+        grid.attach(&dd, 1, 0, 1, 1);
+        grid.attach(&lbl("Angle (°)"), 0, 1, 1, 1);
+        grid.attach(&ang, 1, 1, 1, 1);
+        grid.attach(&lbl("Spacing"), 0, 2, 1, 1);
+        grid.attach(&sp, 1, 2, 1, 1);
+        dialog.set_extra_child(Some(&grid));
+
+        imp.is_dialog_open.set(true);
+        dialog.connect_closed(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                obj.imp().is_dialog_open.set(false);
+                if let Some(page) = obj.imp().tab_view.selected_page() {
+                    page.child().grab_focus();
+                }
+            }
+        ));
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[strong]
+                dd,
+                #[strong]
+                ang,
+                #[strong]
+                sp,
+                move |_, response| {
+                    if response != "ok" {
+                        return;
+                    }
+                    ang.update();
+                    sp.update();
+                    on_ok(HatchSpec {
+                        kind: if dd.selected() == 1 { HatchKind::Cross } else { HatchKind::Lines },
+                        angle: ang.value().to_radians(),
+                        spacing: sp.value(),
+                    });
+                }
+            ),
+        );
+        dialog.present(Some(self));
+    }
+
+    /// คลิกวางข้อความ: เปิดกล่องพิมพ์ แล้วสร้างข้อความที่จุดนั้น
+    fn prompt_new_text(&self, at: Point, scale: f64) {
+        let imp = self.imp();
+        let h0 = if imp.text_height.get() > 0.0 {
+            imp.text_height.get()
+        } else {
+            nice_number(16.0 / scale) // ราว 16 px บนจอตอนนี้
+        };
+        self.show_text_dialog(
+            "Add text",
+            (String::new(), h0, 0.0),
+            glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |text: String, h: f64, rot: f64| {
+                    obj.imp().text_height.set(h);
+                    obj.with_engine(|d| d.add_text(at, text, h, rot.to_radians()));
+                    obj.cancel_action(false);
+                }
+            ),
+        );
+    }
+
+    /// ดับเบิลคลิกที่ Text / Hatch → เปิดกล่องแก้ไข
+    fn edit_at(&self, page: &adw::TabPage, x: f64, y: f64) {
+        let imp = self.imp();
+        let mode = imp.current_mode.get();
+        if !matches!(mode, DrawingMode::Select | DrawingMode::Move) || imp.is_dialog_open.get() {
+            return;
+        }
+        let target = {
+            let pages = imp.pages.borrow();
+            let Some(d_ref) = pages.get(page) else { return };
+            let mut d = d_ref.borrow_mut();
+            let (wx, wy) = d.camera.screen_to_world(x, y);
+            let t = d.edit_target(wx, wy);
+            // คลิกที่ 2 เริ่มการย้ายไปแล้ว (checkpoint ไว้) แต่ยังไม่ขยับ → ยกเลิกการย้ายนั้น
+            if t.is_some() && mode == DrawingMode::Move && imp.move_applied.get() == (0.0, 0.0) {
+                d.discard_last_checkpoint();
+            }
+            t
+        };
+        let Some((id, data)) = target else { return };
+        imp.current_mode.set(DrawingMode::Select);
+        imp.move_base.set(None);
+        imp.drag_start.set(None);
+        imp.is_dragging.set(false);
+        match data {
+            ElementData::Text { text, height, rotation, .. } => {
+                self.show_text_dialog(
+                    "Edit text",
+                    (text, height, rotation.to_degrees()),
+                    glib::clone!(
+                        #[weak(rename_to = obj)]
+                        self,
+                        move |t: String, h: f64, r: f64| {
+                            obj.imp().text_height.set(h);
+                            obj.with_engine(|d| d.set_text(id, t, h, r.to_radians()));
+                        }
+                    ),
+                );
+            }
+            ElementData::Hatch { spec, .. } => {
+                self.show_hatch_dialog(
+                    spec,
+                    glib::clone!(
+                        #[weak(rename_to = obj)]
+                        self,
+                        move |s: HatchSpec| {
+                            obj.with_engine(|d| d.set_hatch_spec(id, s));
+                        }
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // ---------------- Autosave / Recovery ----------------
+
+    /// เซฟสำรองแท็บที่มีงานค้าง (เขียนไฟล์แยก ไม่แตะไฟล์จริง) เรียกทุก AUTOSAVE_SECS วินาที
+    fn autosave_tick(&self) {
+        let imp = self.imp();
+        let dir = autosave_dir();
+        let pages: Vec<adw::TabPage> = imp.pages.borrow().keys().cloned().collect();
+        for page in pages {
+            let job = {
+                let pages = imp.pages.borrow();
+                let Some(d_ref) = pages.get(&page) else { continue };
+                let d = d_ref.borrow();
+                if !d.dirty {
+                    None
+                } else {
+                    let key = (
+                        d.history.len(),
+                        d.undo_stack.len(),
+                        d.id_counter,
+                        d.sel_rev.wrapping_add(d.layout_rev.wrapping_mul(1_000_003)),
+                    );
+                    if imp.autosave_keys.borrow().get(&page) == Some(&key) {
+                        None // ไม่มีอะไรเปลี่ยนตั้งแต่รอบที่แล้ว
+                    } else {
+                        match engine_to_dxf_bytes(&d) {
+                            Ok(b) => Some((b, key, d.file_path.clone())),
+                            Err(e) => {
+                                eprintln!("Autosave failed: {}", e);
+                                None
+                            }
+                        }
+                    }
+                }
+            };
+            let Some((bytes, key, orig)) = job else { continue };
+            let id = {
+                let mut ids = imp.autosave_ids.borrow_mut();
+                let n = ids.len();
+                ids.entry(page.clone()).or_insert_with(|| new_autosave_id(n)).clone()
+            };
+            let meta = format!(
+                "{}\n{}\n",
+                page.title(),
+                orig.map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+            );
+            let res = std::fs::create_dir_all(&dir)
+                .and_then(|_| write_atomic(&dir.join(format!("{id}.meta")), meta.as_bytes()))
+                .and_then(|_| write_atomic(&dir.join(format!("{id}.dxf")), &bytes));
+            match res {
+                Ok(()) => {
+                    imp.autosave_keys.borrow_mut().insert(page, key);
+                }
+                Err(e) => eprintln!("Autosave failed: {}", e),
+            }
+        }
+    }
+
+    fn start_autosave(&self) {
+        glib::timeout_add_seconds_local(
+            AUTOSAVE_SECS,
+            glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    obj.autosave_tick();
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
+    }
+
+    /// ลบไฟล์สำรองของแท็บนี้ (เซฟแล้ว หรือทิ้งงานแล้ว)
+    fn forget_autosave(&self, page: &adw::TabPage) {
+        let imp = self.imp();
+        imp.autosave_keys.borrow_mut().remove(page);
+        if let Some(id) = imp.autosave_ids.borrow_mut().remove(page) {
+            remove_backup(&id);
+        }
+    }
+
+    fn forget_all_autosave(&self) {
+        let imp = self.imp();
+        imp.autosave_keys.borrow_mut().clear();
+        for (_, id) in imp.autosave_ids.borrow_mut().drain() {
+            remove_backup(&id);
+        }
+    }
+
+    /// ตอนเปิดแอป: ถ้ามีไฟล์สำรองค้างจากครั้งก่อน (แอปปิดผิดปกติ) ถามว่าจะกู้คืนไหม
+    fn check_recovery(&self) {
+        let dir = autosave_dir();
+        let mut items: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "dxf"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        items.sort();
+        if items.is_empty() {
+            return;
+        }
+        let n = items.len();
+        let dialog = adw::AlertDialog::new(
+            Some("Recover unsaved work?"),
+            Some(&format!(
+                "Drafting didn't close normally last time. {} drawing{} backed up automatically.",
+                n,
+                if n == 1 { " was" } else { "s were" }
+            )),
+        );
+        dialog.add_responses(&[
+            ("later", "_Ask Later"),
+            ("discard", "_Discard"),
+            ("recover", "_Recover"),
+        ]);
+        dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+        dialog.set_response_appearance("recover", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("recover"));
+        dialog.set_close_response("later");
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |_, response| match response {
+                    "recover" => {
+                        for p in &items {
+                            let (title, orig) = read_backup_meta(p);
+                            obj.open_path_as(p.clone(), Some((title, orig)));
+                        }
+                    }
+                    "discard" => {
+                        for p in &items {
+                            if let Some(stem) = p.file_stem() {
+                                remove_backup(&stem.to_string_lossy());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            ),
+        );
+        dialog.present(Some(self));
+    }
+
+    // ---------------- Print ----------------
+
+    /// กล่องตั้งค่าพิมพ์: กระดาษ แนวกระดาษ พื้นที่ สเกล สี
+    fn show_print_dialog(&self) {
+        // แท็บ Layout พิมพ์ทั้งแผ่นด้วยการตั้งค่าของมันเอง
+        if self.layout_print() {
+            return;
+        }
+        let imp = self.imp();
+        if imp.is_dialog_open.get() {
+            return;
+        }
+        let dialog = adw::AlertDialog::new(
+            Some("Print"),
+            Some("In the next window choose a printer, or “Print to File” to save a PDF."),
+        );
+        dialog.add_responses(&[("cancel", "_Cancel"), ("ok", "_Print…")]);
+        dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("ok"));
+        dialog.set_close_response("cancel");
+
+        let o = imp.print_opts.get();
+        let mk = |items: &[&str], sel: u32| {
+            let d = gtk::DropDown::new(Some(gtk::StringList::new(items)), gtk::Expression::NONE);
+            d.set_selected(sel);
+            d
+        };
+        let papers: Vec<&str> = PAPERS.iter().map(|p| p.0).collect();
+        let scales: Vec<&str> = PRINT_SCALES.iter().map(|p| p.0).collect();
+        let paper = mk(&papers, o.0);
+        let orient = mk(&["Landscape", "Portrait"], o.1);
+        let area = mk(&["Current view", "Everything"], o.2);
+        let scale = mk(&scales, o.3);
+        let color = mk(&["Black", "Colour"], o.4);
+
+        let lbl = |s: &str| gtk::Label::builder().label(s).xalign(0.0).build();
+        let grid = gtk::Grid::builder()
+            .column_spacing(12)
+            .row_spacing(8)
+            .halign(gtk::Align::Center)
+            .build();
+        for (i, (name, w)) in [
+            ("Paper", &paper),
+            ("Orientation", &orient),
+            ("Area", &area),
+            ("Scale", &scale),
+            ("Lines", &color),
+        ]
+        .iter()
+        .enumerate()
+        {
+            grid.attach(&lbl(name), 0, i as i32, 1, 1);
+            grid.attach(*w, 1, i as i32, 1, 1);
+        }
+        dialog.set_extra_child(Some(&grid));
+
+        imp.is_dialog_open.set(true);
+        dialog.connect_closed(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                obj.imp().is_dialog_open.set(false);
+                if let Some(page) = obj.imp().tab_view.selected_page() {
+                    page.child().grab_focus();
+                }
+            }
+        ));
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move |_, response| {
+                    if response != "ok" {
+                        return;
+                    }
+                    let sel = (
+                        paper.selected(),
+                        orient.selected(),
+                        area.selected(),
+                        scale.selected(),
+                        color.selected(),
+                    );
+                    obj.imp().print_opts.set(sel);
+                    // เปิดหน้าต่างพิมพ์หลังกล่องนี้ปิดสนิท
+                    glib::idle_add_local_once(glib::clone!(
+                        #[weak]
+                        obj,
+                        move || obj.run_print(
+                            sel.0 as usize,
+                            sel.1 == 0,
+                            sel.2 == 1,
+                            sel.3 as usize,
+                            sel.4 == 0
+                        )
+                    ));
+                }
+            ),
+        );
+        dialog.present(Some(self));
+    }
+
+    fn run_print(&self, paper: usize, landscape: bool, whole: bool, scale: usize, mono: bool) {
+        let imp = self.imp();
+        let Some(page) = imp.tab_view.selected_page() else { return };
+        let (Some(&(_, pw0, ph0)), Some(&(_, n))) = (PAPERS.get(paper), PRINT_SCALES.get(scale)) else {
+            return;
+        };
+        let (pw, ph) = if landscape { (ph0, pw0) } else { (pw0, ph0) };
+        // พื้นที่พิมพ์ในหน่วย "px" (1 px = 0.125 มม. ตามที่ความหนาเส้นใช้: 0.25 มม. = 2 px)
+        let (bw, bh) = (
+            (pw - 2.0 * PRINT_MARGIN_MM) / PX_MM,
+            (ph - 2.0 * PRINT_MARGIN_MM) / PX_MM,
+        );
+        let (cw, ch) = (page.child().width() as f64, page.child().height() as f64);
+
+        let cmds = self
+            .with_engine(|d| {
+                let (x0, y0, x1, y1) = if whole {
+                    let (a, b) = d.get_elements_bounds()?;
+                    (a.x, a.y, b.x, b.y)
+                } else {
+                    let a = d.camera.screen_to_world(0.0, 0.0);
+                    let b = d.camera.screen_to_world(cw, ch);
+                    (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
+                };
+                let (dx, dy) = ((x1 - x0).max(1e-6), (y1 - y0).max(1e-6));
+                let s = match n {
+                    None => (bw / dx).min(bh / dy) * 0.98,
+                    Some(n) => 1.0 / (n * PX_MM), // 1 มม. ในแบบ → 1/n มม. บนกระดาษ
+                };
+                let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+                let saved = (d.camera.scale, d.camera.offset);
+                d.camera.scale = s;
+                d.camera.offset = (bw / 2.0 - cx * s, bh / 2.0 + cy * s);
+                let cmds = d.get_render_commands_in(0.0, 0.0, bw, bh);
+                d.camera.scale = saved.0;
+                d.camera.offset = saved.1;
+                Some(cmds)
+            })
+            .flatten();
+        let Some(cmds) = cmds else {
+            self.show_error("Nothing to print", "There are no objects to print.");
+            return;
+        };
+        let cmds = print_prepare(cmds, mono);
+
+        let setup = gtk::PageSetup::new();
+        setup.set_paper_size(&gtk::PaperSize::new_custom(
+            "drafting",
+            "Drafting",
+            pw0,
+            ph0,
+            gtk::Unit::Mm,
+        ));
+        setup.set_orientation(if landscape {
+            gtk::PageOrientation::Landscape
+        } else {
+            gtk::PageOrientation::Portrait
+        });
+        setup.set_top_margin(PRINT_MARGIN_MM, gtk::Unit::Mm);
+        setup.set_bottom_margin(PRINT_MARGIN_MM, gtk::Unit::Mm);
+        setup.set_left_margin(PRINT_MARGIN_MM, gtk::Unit::Mm);
+        setup.set_right_margin(PRINT_MARGIN_MM, gtk::Unit::Mm);
+
+        let op = gtk::PrintOperation::new();
+        op.set_job_name(page.title().as_str());
+        op.set_n_pages(1);
+        op.set_unit(gtk::Unit::Mm);
+        op.set_default_page_setup(Some(&setup));
+        op.connect_draw_page(move |_, ctx, _| {
+            let cr = ctx.cairo_context();
+            let (aw, ah) = (ctx.width() / PX_MM, ctx.height() / PX_MM);
+            cr.scale(PX_MM, PX_MM);
+            cr.translate(((aw - bw) / 2.0).max(0.0), ((ah - bh) / 2.0).max(0.0));
+            cr.rectangle(0.0, 0.0, bw, bh);
+            cr.clip();
+            CairoRenderer::new(&cr).draw_commands(cmds.clone());
+        });
+        if let Err(e) = op.run(gtk::PrintOperationAction::PrintDialog, Some(self)) {
+            self.show_error("Can't print", &e.to_string());
+        }
+    }
+
+    // ---------------- Copy / Cut / Paste ----------------
+
+    pub fn copy_action(&self) {
+        if self.layout_clip(layout_ui::ClipOp::Copy) {
+            return;
+        }
+        let items = self.with_engine(|d| d.copy_selected()).unwrap_or_default();
+        if !items.is_empty() {
+            layout_ui::clear_vp_clip();
+            CLIPBOARD.with(|c| *c.borrow_mut() = items);
+        }
+    }
+
+    pub fn cut_action(&self) {
+        if self.layout_clip(layout_ui::ClipOp::Cut) {
+            return;
+        }
+        self.copy_action();
+        self.delete_action();
+    }
+
+    /// in_place = วางที่พิกัดเดิม; ไม่งั้นวางโดยให้กึ่งกลางของที่ copy อยู่ที่เมาส์
+    pub fn paste_action(&self, in_place: bool) {
+        let op = if in_place { layout_ui::ClipOp::PasteInPlace } else { layout_ui::ClipOp::Paste };
+        if self.layout_clip(op) {
+            return;
+        }
+        let items = CLIPBOARD.with(|c| c.borrow().clone());
+        if items.is_empty() {
+            return;
+        }
+        let (mx, my) = self.imp().mouse_pos.get();
+        self.with_engine(|d| {
+            let (dx, dy) = if in_place {
+                (0.0, 0.0)
+            } else {
+                match crate::engine::clip_bounds(&items) {
+                    Some((x0, y0, x1, y1)) => {
+                        let (wx, wy) = d.camera.screen_to_world(mx, my);
+                        (wx - (x0 + x1) / 2.0, wy - (y0 + y1) / 2.0)
+                    }
+                    None => (0.0, 0.0),
+                }
+            };
+            d.paste_items(&items, dx, dy);
+        });
     }
 
     pub fn delete_action(&self) {
@@ -3388,6 +4200,7 @@ impl DraftingWindow {
 
         let mut d = d_ref.borrow_mut();
         d.dirty = false;
+        self.forget_autosave(page);
         if let Some(name) = path.file_name() {
             page.set_title(&name.to_string_lossy());
         }
@@ -3427,12 +4240,18 @@ impl DraftingWindow {
     }
 
     pub fn open_path(&self, path: PathBuf) {
+        self.open_path_as(path, None);
+    }
+
+    /// restore = Some((ชื่อแท็บ, path ไฟล์จริง)) เมื่อเปิดจากไฟล์สำรอง (แท็บจะถือว่ามีงานค้าง)
+    fn open_path_as(&self, path: PathBuf, restore: Option<(String, Option<PathBuf>)>) {
         let obj = self.clone();
         glib::spawn_future_local(async move {
             let title = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Untitled".to_string());
+            let title = restore.as_ref().map(|r| r.0.clone()).unwrap_or(title);
 
             let p = path.clone();
             let result = gio::spawn_blocking(move || {
@@ -3478,8 +4297,21 @@ impl DraftingWindow {
                 d.file_path = if is_dwg { None } else { Some(path.clone()) };
                 d.dirty = false;
                 d.skipped = skipped;
+                d.layouts = imported.layouts;
+                if let Some((_, orig)) = &restore {
+                    // กู้คืนแล้ว: ยังไม่เซฟลงไฟล์จริง → ถือว่ามีงานค้าง และใช้ไฟล์สำรองเดิมต่อ
+                    d.file_path = orig.clone();
+                    d.dirty = true;
+                    if let Some(stem) = path.file_stem() {
+                        obj.imp()
+                            .autosave_ids
+                            .borrow_mut()
+                            .insert(page.clone(), stem.to_string_lossy().to_string());
+                    }
+                }
             }
             obj.refresh_layers();
+            obj.open_layout_tabs(&page);
 
             if skipped > 0 {
                 eprintln!("Skipped {} unsupported entities", skipped);
@@ -3544,6 +4376,7 @@ impl DraftingWindow {
                             });
                         }
                         "discard" => {
+                            obj.forget_autosave(&page);
                             obj.imp().pages.borrow_mut().remove(&page);
                             view.close_page_finish(&page, true);
                         }
@@ -3570,6 +4403,7 @@ impl DraftingWindow {
                 self,
                 move |_, response| {
                     if response == "discard" {
+                        obj.forget_all_autosave();
                         obj.imp().force_close.set(true);
                         obj.close();
                     }
@@ -3578,6 +4412,195 @@ impl DraftingWindow {
         );
         dialog.present(Some(self));
     }
+}
+
+/// ปัดเป็นเลขกลม 1 / 2 / 5 × 10^n ที่ใกล้ที่สุด
+fn nice_number(x: f64) -> f64 {
+    if !(x > 0.0 && x.is_finite()) {
+        return 2.5;
+    }
+    let p = 10f64.powf(x.log10().floor());
+    let m = x / p;
+    let n = if m < 1.5 {
+        1.0
+    } else if m < 3.5 {
+        2.0
+    } else if m < 7.5 {
+        5.0
+    } else {
+        10.0
+    };
+    n * p
+}
+
+const AUTOSAVE_SECS: u32 = 120;
+
+/// กระดาษ (ชื่อ, กว้าง, ยาว) มม. แนวตั้ง
+const PAPERS: [(&str, f64, f64); 6] = [
+    ("A4", 210.0, 297.0),
+    ("A3", 297.0, 420.0),
+    ("A2", 420.0, 594.0),
+    ("A1", 594.0, 841.0),
+    ("A0", 841.0, 1189.0),
+    ("Letter", 215.9, 279.4),
+];
+
+/// สเกลพิมพ์ 1:n (None = พอดีหน้ากระดาษ)
+const PRINT_SCALES: [(&str, Option<f64>); 10] = [
+    ("Fit to page", None),
+    ("1:1", Some(1.0)),
+    ("1:2", Some(2.0)),
+    ("1:5", Some(5.0)),
+    ("1:10", Some(10.0)),
+    ("1:20", Some(20.0)),
+    ("1:50", Some(50.0)),
+    ("1:100", Some(100.0)),
+    ("1:200", Some(200.0)),
+    ("1:500", Some(500.0)),
+];
+const PRINT_MARGIN_MM: f64 = 10.0;
+/// หน่วยที่ตัววาดใช้: 1 px = 0.125 มม. บนกระดาษ
+const PX_MM: f64 = 0.125;
+
+fn autosave_dir() -> PathBuf {
+    glib::user_data_dir().join("drafting").join("autosave")
+}
+
+fn new_autosave_id(n: usize) -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{:x}-{}", ms, n)
+}
+
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+fn remove_backup(id: &str) {
+    let dir = autosave_dir();
+    let _ = std::fs::remove_file(dir.join(format!("{id}.dxf")));
+    let _ = std::fs::remove_file(dir.join(format!("{id}.meta")));
+}
+
+/// (ชื่อแท็บ, path ไฟล์จริงถ้ามี) จาก .meta ที่อยู่ข้างไฟล์สำรอง
+fn read_backup_meta(dxf: &std::path::Path) -> (String, Option<PathBuf>) {
+    let text = std::fs::read_to_string(dxf.with_extension("meta")).unwrap_or_default();
+    let mut lines = text.lines();
+    let title = lines
+        .next()
+        .filter(|t| !t.is_empty())
+        .unwrap_or("Recovered drawing")
+        .to_string();
+    let orig = lines.next().filter(|p| !p.is_empty()).map(PathBuf::from);
+    (title, orig)
+}
+
+/// เตรียมคำสั่งวาดสำหรับพิมพ์: ไม่มีสีเลือก, เส้นสีดำ (หรือสีจริงแต่ขาว→ดำ), มิติเป็นสีดำ
+fn print_prepare(cmds: Vec<RenderCommand>, mono: bool) -> Vec<RenderCommand> {
+    let fix = |c: (f64, f64, f64)| {
+        if mono || (c.0 > 0.9 && c.1 > 0.9 && c.2 > 0.9) { (0.0, 0.0, 0.0) } else { c }
+    };
+    let black = (0.0, 0.0, 0.0);
+    let mut cur: (f64, Vec<f64>) = (2.0, Vec::new());
+    let mut out = Vec::with_capacity(cmds.len());
+    for c in cmds {
+        match c {
+            RenderCommand::Line { x1, y1, x2, y2, color, .. } => {
+                out.push(RenderCommand::Line { x1, y1, x2, y2, is_selected: false, color: fix(color) })
+            }
+            RenderCommand::Circle { cx, cy, radius, color, .. } => {
+                out.push(RenderCommand::Circle { cx, cy, radius, is_selected: false, color: fix(color) })
+            }
+            RenderCommand::Arc { cx, cy, radius, start_angle, end_angle, color, .. } => {
+                out.push(RenderCommand::Arc {
+                    cx,
+                    cy,
+                    radius,
+                    start_angle,
+                    end_angle,
+                    is_selected: false,
+                    color: fix(color),
+                })
+            }
+            RenderCommand::Polyline { points, closed, color, .. } => out.push(RenderCommand::Polyline {
+                points,
+                closed,
+                is_selected: false,
+                color: fix(color),
+            }),
+            RenderCommand::Fill { loops, filled, color, .. } => out.push(RenderCommand::Fill {
+                loops,
+                filled,
+                is_selected: false,
+                color: fix(color),
+            }),
+            RenderCommand::Style { lw, dash } => {
+                cur = (lw, dash.clone());
+                out.push(RenderCommand::Style { lw, dash });
+            }
+            RenderCommand::Text { x, y, em_px, rotation, wrap_px, text, halign, valign, color, .. } => {
+                out.push(RenderCommand::Text {
+                    x,
+                    y,
+                    em_px,
+                    rotation,
+                    wrap_px,
+                    text,
+                    halign,
+                    valign,
+                    is_selected: false,
+                    color: fix(color),
+                })
+            }
+            RenderCommand::Dimension {
+                text_x, text_y, text,
+                dim_x1, dim_y1, dim_x2, dim_y2,
+                ext1_x1, ext1_y1, ext1_x2, ext1_y2,
+                ext2_x1, ext2_y1, ext2_x2, ext2_y2,
+                ..
+            } => {
+                // ตัววาดมิติใช้สีเหลืองบนจอ → บนกระดาษแตกเป็นเส้นดำ + ตัวเลขดำ
+                out.push(RenderCommand::Style { lw: 1.5, dash: Vec::new() });
+                for (a, b, c, d) in [
+                    (ext1_x1, ext1_y1, ext1_x2, ext1_y2),
+                    (ext2_x1, ext2_y1, ext2_x2, ext2_y2),
+                    (dim_x1, dim_y1, dim_x2, dim_y2),
+                ] {
+                    out.push(RenderCommand::Line {
+                        x1: a,
+                        y1: b,
+                        x2: c,
+                        y2: d,
+                        is_selected: false,
+                        color: black,
+                    });
+                }
+                out.push(RenderCommand::Text {
+                    x: text_x,
+                    y: text_y - 6.0,
+                    em_px: 24.0,
+                    rotation: 0.0,
+                    wrap_px: 0.0,
+                    text,
+                    halign: crate::text::HAlign::Center,
+                    valign: crate::text::VAlign::Bottom,
+                    is_selected: false,
+                    color: black,
+                });
+                out.push(RenderCommand::Style { lw: cur.0, dash: cur.1.clone() });
+            }
+        }
+    }
+    out
+}
+
+thread_local! {
+    /// Copy/Paste ใช้ร่วมกันทุกแท็บ
+    static CLIPBOARD: RefCell<Vec<crate::engine::ClipItem>> = const { RefCell::new(Vec::new()) };
 }
 
 fn scene_margin(w: f64, h: f64) -> (f64, f64) {
@@ -3807,7 +4830,7 @@ fn trace_ghost(cr: &gtk::cairo::Context, cam: &crate::engine::Camera, data: &Ele
                 }
             }
         }
-        ElementData::Fill { loops, .. } => {
+        ElementData::Fill { loops, .. } | ElementData::Hatch { loops, .. } => {
             for l in loops {
                 for (i, p) in l.iter().enumerate() {
                     let (x, y) = cam.world_to_screen(p.x, p.y);
@@ -4163,6 +5186,7 @@ struct Imported {
     layers: Vec<crate::engine::Layer>,
     items: Vec<(ElementData, usize, Option<Rgb>, crate::linestyle::ElementStyle)>,
     skipped: usize,
+    layouts: Vec<crate::layout::LayoutSpec>,
 }
 
 fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
@@ -4281,7 +5305,9 @@ fn dxf_to_elements(doc: &acadrust::CadDocument) -> Imported {
             items.push((data, li, col, style.clone()));
         }
     }
-    Imported { layers, items, skipped }
+    let mut layouts = crate::layout::read_layouts(doc);
+    layout_ui::read_paper_items(doc, &mut layouts);
+    Imported { layers, items, skipped, layouts }
 }
 
 fn to_ac_color(c: Rgb) -> acadrust::Color {
@@ -4409,6 +5435,17 @@ fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> 
                     }
                 }
             }
+            ElementData::Hatch { loops, spec } => {
+                // DXF ที่เราเขียนยังไม่มี pattern → บันทึกเป็นเส้นลายแต่ละเส้น (LINE)
+                match crate::hatch::pattern_segments(loops, spec, None) {
+                    Some(segs) => {
+                        for (a, b) in segs {
+                            push(line(a, b))?;
+                        }
+                    }
+                    None => eprintln!("Hatch is too dense to save as lines; skipped"),
+                }
+            }
             ElementData::Text { pos, height, rotation, text, halign, valign, width } => push(
                 crate::text::to_dxf_entity(*pos, *height, *rotation, text, *halign, *valign, *width),
             )?,
@@ -4420,6 +5457,9 @@ fn engine_to_dxf_bytes(data: &crate::engine::Engine) -> Result<Vec<u8>, String> 
             }
         }
     }
+
+    crate::layout::write_layouts(&mut doc, &data.layouts)?;
+    layout_ui::write_paper_items(&mut doc, &data.layouts)?;
 
     DxfWriter::new(&doc).write_to_vec().map_err(|e| e.to_string())
 }
