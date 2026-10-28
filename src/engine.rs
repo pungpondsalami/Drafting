@@ -69,6 +69,10 @@ pub enum ToolMode {
     Trim,
     Extend,
     Mirror,
+    Rotate,
+    Scale,
+    Fillet,
+    Chamfer,
     Hatch,
     Text,
 }
@@ -326,6 +330,131 @@ pub fn reflect_point(p: Point, a: Point, b: Point) -> Point {
     let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
     let (fx, fy) = (a.x + dx * t, a.y + dy * t);
     Point { x: 2.0 * fx - p.x, y: 2.0 * fy - p.y }
+}
+
+/// ผลคำนวณ Fillet / Chamfer (ยังไม่แก้ข้อมูล)
+struct CornerPlan {
+    info: CornerInfo,
+    i1: usize,
+    i2: usize,
+    t1: Point,
+    t2: Point,
+    extra: Option<ElementData>,
+}
+
+/// ผลของ Fillet / Chamfer ที่ใช้เล่นแอนิเมชัน "มุมยุบ"
+#[derive(Debug, Clone)]
+pub struct CornerInfo {
+    pub ids: Vec<u64>, // เส้นสองเส้น + วัตถุใหม่ (ส่วนโค้ง/เส้นตัดมุม) ถ้ามี
+    pub x: Point,      // จุดตัดของเส้นสองเส้น
+    pub u1: (f64, f64),
+    pub u2: (f64, f64),
+    pub e1: Point, // ปลายที่เก็บไว้ของแต่ละเส้น
+    pub e2: Point,
+    pub ang: f64,
+    pub v: f64,
+    pub chamfer: bool,
+    pub tdist: f64,
+}
+
+impl CornerInfo {
+    /// ภาพมุมตอนยุบไปแล้ว e (0 = มุมแหลมเดิม, 1 = ผลลัพธ์จริง)
+    pub fn ghost(&self, e: f64) -> Vec<ElementData> {
+        let td = self.tdist * e;
+        let x = self.x;
+        let t1 = Point { x: x.x + self.u1.0 * td, y: x.y + self.u1.1 * td };
+        let t2 = Point { x: x.x + self.u2.0 * td, y: x.y + self.u2.1 * td };
+        let mut out = vec![
+            ElementData::Line { start: t1, end: self.e1 },
+            ElementData::Line { start: t2, end: self.e2 },
+        ];
+        if self.chamfer {
+            if td > 1e-12 {
+                out.push(ElementData::Line { start: t1, end: t2 });
+            }
+        } else {
+            let v = self.v * e;
+            if v > 1e-9 {
+                let bis = (self.u1.0 + self.u2.0, self.u1.1 + self.u2.1);
+                let bl = bis.0.hypot(bis.1);
+                let cdist = v / (self.ang / 2.0).sin();
+                let c = Point { x: x.x + bis.0 / bl * cdist, y: x.y + bis.1 / bl * cdist };
+                let aa = (t1.y - c.y).atan2(t1.x - c.x);
+                let ab = (t2.y - c.y).atan2(t2.x - c.x);
+                let pi = std::f64::consts::PI;
+                let dd = (ab - aa + pi).rem_euclid(TAU) - pi;
+                let (s, span) = if dd >= 0.0 { (aa, dd) } else { (ab, -dd) };
+                let s = s.rem_euclid(TAU);
+                out.push(ElementData::Arc {
+                    center: c,
+                    radius: v,
+                    start_angle: s,
+                    end_angle: s + span,
+                });
+            }
+        }
+        out
+    }
+}
+
+impl ElementData {
+    /// สำเนาที่หมุนรอบจุด c ด้วยมุม ang เรเดียน (ทวนเข็ม)
+    pub fn rotated(&self, c: Point, ang: f64) -> ElementData {
+        let (s, co) = ang.sin_cos();
+        let r = |p: &Point| Point {
+            x: c.x + (p.x - c.x) * co - (p.y - c.y) * s,
+            y: c.y + (p.x - c.x) * s + (p.y - c.y) * co,
+        };
+        match self {
+            ElementData::Line { start, end } => ElementData::Line { start: r(start), end: r(end) },
+            ElementData::Circle { center, radius } => {
+                ElementData::Circle { center: r(center), radius: *radius }
+            }
+            ElementData::Dimension { start, end, offset } => {
+                ElementData::Dimension { start: r(start), end: r(end), offset: *offset }
+            }
+            ElementData::Arc { center, radius, start_angle, end_angle } => {
+                let span = end_angle - start_angle;
+                let a0 = (start_angle + ang).rem_euclid(TAU);
+                ElementData::Arc {
+                    center: r(center),
+                    radius: *radius,
+                    start_angle: a0,
+                    end_angle: a0 + span,
+                }
+            }
+            ElementData::Polyline { points, closed } => ElementData::Polyline {
+                points: points.iter().map(r).collect(),
+                closed: *closed,
+            },
+            ElementData::Fill { loops, filled } => ElementData::Fill {
+                loops: loops.iter().map(|l| l.iter().map(r).collect()).collect(),
+                filled: *filled,
+            },
+            ElementData::Hatch { loops, spec } => ElementData::Hatch {
+                loops: loops.iter().map(|l| l.iter().map(r).collect()).collect(),
+                spec: HatchSpec { angle: spec.angle + ang, ..*spec },
+            },
+            ElementData::Text { pos, height, rotation, text, halign, valign, width } => {
+                ElementData::Text {
+                    pos: r(pos),
+                    height: *height,
+                    rotation: rotation + ang,
+                    text: text.clone(),
+                    halign: *halign,
+                    valign: *valign,
+                    width: *width,
+                }
+            }
+        }
+    }
+
+    /// สำเนาที่ย่อ/ขยายรอบจุด c ด้วยตัวคูณ k
+    pub fn scaled(&self, c: Point, k: f64) -> ElementData {
+        let mut e = self.clone();
+        e.scale_about(c, k);
+        e
+    }
 }
 
 impl ElementData {
@@ -710,6 +839,8 @@ pub struct Engine {
     pub layout_rev: u64,
     /// กำลังลากย้าย: index ยังเป็นของตำแหน่งเดิม; moving = id ที่ต้องวาดเสมอ
     moving: Vec<u64>,
+    /// วัตถุที่ซ่อนชั่วคราวระหว่างแอนิเมชัน (window วาด ghost แทน)
+    pub anim_hidden: Vec<u64>,
     index_stale: bool,
     zoom_cap_key: (usize, u64),
 }
@@ -739,6 +870,7 @@ impl Engine {
             layouts: Vec::new(),
             layout_rev: 0,
             moving: Vec::new(),
+            anim_hidden: Vec::new(),
             index_stale: false,
             zoom_cap_key: (usize::MAX, 0),
         }
@@ -820,7 +952,153 @@ impl Engine {
         offset_data(&self.history[i].data, side, dist).ok()
     }
 
+    /// เส้นตรง (Line) ใต้เมาส์ สำหรับ Fillet / Chamfer
+    pub fn corner_pick(&self, wx: f64, wy: f64) -> Option<u64> {
+        let id = self.pick_at(wx, wy)?;
+        let i = self.index_of(id)?;
+        matches!(self.history[i].data, ElementData::Line { .. }).then_some(id)
+    }
+
+    /// คำนวณ Fillet (chamfer = false, v = รัศมี) หรือ Chamfer (v = ระยะตัดมุมตามแต่ละเส้น) โดยไม่แก้ข้อมูล
+    /// ส่วนที่คลิก (p1, p2) คือส่วนที่เก็บไว้; v = 0 ของ Fillet = ต่อมุมให้ชนกันเฉยๆ
+    fn corner_plan(
+        &self,
+        id1: u64,
+        p1: Point,
+        id2: u64,
+        p2: Point,
+        v: f64,
+        chamfer: bool,
+    ) -> Result<CornerPlan, &'static str> {
+        if id1 == id2 {
+            return Err("Pick two different lines");
+        }
+        let i1 = self.index_of(id1).ok_or("Object no longer exists")?;
+        let i2 = self.index_of(id2).ok_or("Object no longer exists")?;
+        let (ElementData::Line { start: a1, end: b1 }, ElementData::Line { start: a2, end: b2 }) =
+            (&self.history[i1].data, &self.history[i2].data)
+        else {
+            return Err("Fillet / Chamfer works on two straight lines");
+        };
+        let (a1, b1, a2, b2) = (*a1, *b1, *a2, *b2);
+        let (d1x, d1y) = (b1.x - a1.x, b1.y - a1.y);
+        let (d2x, d2y) = (b2.x - a2.x, b2.y - a2.y);
+        let (l1, l2) = (d1x.hypot(d1y), d2x.hypot(d2y));
+        let den = d1x * d2y - d1y * d2x;
+        if l1 < 1e-12 || l2 < 1e-12 || den.abs() < 1e-9 * l1 * l2 {
+            return Err("Lines are parallel");
+        }
+        let t = ((a2.x - a1.x) * d2y - (a2.y - a1.y) * d2x) / den;
+        let x = Point { x: a1.x + d1x * t, y: a1.y + d1y * t };
+        // ทิศจากจุดตัดไปทางด้านที่คลิก
+        let dir = |dx: f64, dy: f64, l: f64, p: Point| {
+            let s = (p.x - x.x) * dx + (p.y - x.y) * dy;
+            let sg = if s >= 0.0 { 1.0 } else { -1.0 };
+            (dx / l * sg, dy / l * sg)
+        };
+        let u1 = dir(d1x, d1y, l1, p1);
+        let u2 = dir(d2x, d2y, l2, p2);
+        // ปลายที่เก็บไว้ (ไกลจุดตัดสุดไปทางด้านที่คลิก) และระยะจากจุดตัด
+        let far = |a: Point, b: Point, u: (f64, f64)| {
+            let sa = (a.x - x.x) * u.0 + (a.y - x.y) * u.1;
+            let sb = (b.x - x.x) * u.0 + (b.y - x.y) * u.1;
+            if sa >= sb { (a, sa) } else { (b, sb) }
+        };
+        let (e1, s1) = far(a1, b1, u1);
+        let (e2, s2) = far(a2, b2, u2);
+        let ang = (u1.0 * u2.0 + u1.1 * u2.1).clamp(-1.0, 1.0).acos(); // มุมระหว่างสองแขน
+        if ang < 1e-6 || std::f64::consts::PI - ang < 1e-6 {
+            return Err("Lines are parallel");
+        }
+        let v = if v.is_finite() { v.max(0.0) } else { 0.0 };
+        let tdist = if chamfer {
+            v
+        } else if v <= 1e-12 {
+            0.0
+        } else {
+            v / (ang / 2.0).tan()
+        };
+        if tdist > 1e-12 && (tdist > s1 - 1e-6 || tdist > s2 - 1e-6) {
+            return Err("Lines are too short for this size");
+        }
+        let t1 = Point { x: x.x + u1.0 * tdist, y: x.y + u1.1 * tdist };
+        let t2 = Point { x: x.x + u2.0 * tdist, y: x.y + u2.1 * tdist };
+        let extra = if !chamfer && v > 1e-12 {
+            let bis = (u1.0 + u2.0, u1.1 + u2.1);
+            let bl = bis.0.hypot(bis.1);
+            let cdist = v / (ang / 2.0).sin();
+            let c = Point { x: x.x + bis.0 / bl * cdist, y: x.y + bis.1 / bl * cdist };
+            let aa = (t1.y - c.y).atan2(t1.x - c.x);
+            let ab = (t2.y - c.y).atan2(t2.x - c.x);
+            let dd = (ab - aa + std::f64::consts::PI).rem_euclid(TAU) - std::f64::consts::PI;
+            let (s, span) = if dd >= 0.0 { (aa, dd) } else { (ab, -dd) };
+            let s = s.rem_euclid(TAU);
+            Some(ElementData::Arc { center: c, radius: v, start_angle: s, end_angle: s + span })
+        } else if chamfer && tdist > 1e-12 {
+            Some(ElementData::Line { start: t1, end: t2 })
+        } else {
+            None
+        };
+        Ok(CornerPlan {
+            info: CornerInfo { ids: vec![id1, id2], x, u1, u2, e1, e2, ang, v, chamfer, tdist },
+            i1,
+            i2,
+            t1,
+            t2,
+            extra,
+        })
+    }
+
+    /// พรีวิว: คืนข้อมูลสำหรับวาด ghost (ไม่แก้แบบ)
+    pub fn corner_preview(
+        &self,
+        id1: u64,
+        p1: Point,
+        id2: u64,
+        p2: Point,
+        v: f64,
+        chamfer: bool,
+    ) -> Result<CornerInfo, &'static str> {
+        self.corner_plan(id1, p1, id2, p2, v, chamfer).map(|p| p.info)
+    }
+
+    /// ทำ Fillet / Chamfer จริง
+    pub fn corner_apply(
+        &mut self,
+        id1: u64,
+        p1: Point,
+        id2: u64,
+        p2: Point,
+        v: f64,
+        chamfer: bool,
+    ) -> Result<CornerInfo, &'static str> {
+        let CornerPlan { mut info, i1, i2, t1, t2, extra } =
+            self.corner_plan(id1, p1, id2, p2, v, chamfer)?;
+        let (layer, color, style) =
+            (self.history[i1].layer, self.history[i1].color, self.history[i1].style.clone());
+        self.checkpoint();
+        self.history[i1].data = ElementData::Line { start: t1, end: info.e1 };
+        self.history[i2].data = ElementData::Line { start: t2, end: info.e2 };
+        if let Some(data) = extra {
+            let id = self.get_next_id();
+            info.ids.push(id);
+            self.add_element(DrawingElement { id, is_selected: false, layer, color, style, data });
+        }
+        self.rebuild_index();
+        Ok(info)
+    }
+
     pub fn offset_apply(&mut self, id: u64, side: Point, dist: f64) -> Result<(), &'static str> {
+        self.offset_apply_new(id, side, dist).map(|_| ())
+    }
+
+    /// เหมือน offset_apply แต่คืน id ของวัตถุที่สร้างใหม่
+    pub fn offset_apply_new(
+        &mut self,
+        id: u64,
+        side: Point,
+        dist: f64,
+    ) -> Result<u64, &'static str> {
         let i = self.index_of(id).ok_or("Object no longer exists")?;
         let data = offset_data(&self.history[i].data, side, dist)?;
         let (layer, color, style) =
@@ -828,7 +1106,7 @@ impl Engine {
         self.checkpoint();
         let id = self.get_next_id();
         self.add_element(DrawingElement { id, is_selected: false, layer, color, style, data });
-        Ok(())
+        Ok(id)
     }
 
     fn cutters_in(&self, skip_id: u64, area: &BoundingBox) -> Vec<Prim> {
@@ -917,6 +1195,41 @@ impl Engine {
         extend_data(&self.history[i].data, Point { x: wx, y: wy }, &cutters, reach)
             .ok()
             .map(|(_, a)| a)
+    }
+
+    /// แตก Polyline ที่เลือกเป็นเส้นตรงทีละช่วง (ผลลัพธ์ยังถูกเลือกอยู่) คืนจำนวน polyline ที่แตก
+    pub fn explode_selected(&mut self) -> usize {
+        let ids: std::collections::HashSet<u64> = self
+            .history
+            .iter()
+            .filter(|e| e.is_selected && matches!(e.data, ElementData::Polyline { .. }))
+            .map(|e| e.id)
+            .collect();
+        if ids.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        let mut news = Vec::new();
+        for el in self.history.iter().filter(|e| ids.contains(&e.id)) {
+            if let ElementData::Polyline { points, closed } = &el.data {
+                let n = points.len();
+                let segs = if *closed { n } else { n.saturating_sub(1) };
+                for i in 0..segs {
+                    let (a, b) = (points[i], points[(i + 1) % n]);
+                    if (a.x - b.x).hypot(a.y - b.y) > 1e-12 {
+                        news.push((el.layer, el.color, el.style.clone(), ElementData::Line { start: a, end: b }));
+                    }
+                }
+            }
+        }
+        self.history.retain(|e| !ids.contains(&e.id));
+        for (layer, color, style, data) in news {
+            let id = self.get_next_id();
+            self.history.push(DrawingElement { id, is_selected: true, layer, color, style, data });
+        }
+        self.rebuild_index();
+        self.hovered_id = None;
+        ids.len()
     }
 
     pub fn delete_selected(&mut self) -> usize {
@@ -1141,6 +1454,109 @@ impl Engine {
             self.rebuild_index();
         }
         sel.len()
+    }
+
+    /// แปลงวัตถุที่เลือกด้วย f; keep = เก็บต้นฉบับไว้ (สร้างสำเนา) คืนจำนวนชิ้นที่ทำ
+    fn transform_selected_with(
+        &mut self,
+        keep: bool,
+        f: &dyn Fn(&ElementData) -> ElementData,
+    ) -> usize {
+        let ids: Vec<u64> =
+            self.history.iter().filter(|e| e.is_selected).map(|e| e.id).collect();
+        self.transform_ids_with(&ids, keep, f).len()
+    }
+
+    /// เหมือน transform_selected_with แต่ระบุวัตถุด้วย id (แอนิเมชันเลือกไว้ตอนคลิก)
+    fn transform_ids_with(
+        &mut self,
+        ids: &[u64],
+        keep: bool,
+        f: &dyn Fn(&ElementData) -> ElementData,
+    ) -> Vec<u64> {
+        let sel: Vec<usize> = ids.iter().filter_map(|&id| self.index_of(id)).collect();
+        if sel.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<u64> = Vec::new();
+        self.checkpoint();
+        if keep {
+            let copies: Vec<DrawingElement> = sel
+                .iter()
+                .map(|&i| {
+                    let e = &self.history[i];
+                    DrawingElement {
+                        id: 0,
+                        is_selected: false,
+                        layer: e.layer,
+                        color: e.color,
+                        style: e.style.clone(),
+                        data: f(&e.data),
+                    }
+                })
+                .collect();
+            for mut c in copies {
+                c.id = self.get_next_id();
+                out.push(c.id);
+                self.add_element(c);
+            }
+        } else {
+            for &i in &sel {
+                let m = f(&self.history[i].data);
+                self.history[i].data = m;
+                out.push(self.history[i].id);
+            }
+            self.rebuild_index();
+        }
+        out
+    }
+
+    /// หมุนวัตถุที่เลือกรอบจุด c ด้วยมุม ang (เรเดียน)
+    pub fn rotate_selected(&mut self, c: Point, ang: f64, keep: bool) -> usize {
+        if !ang.is_finite() {
+            return 0;
+        }
+        self.transform_selected_with(keep, &|e| e.rotated(c, ang))
+    }
+
+    /// คืน id ของวัตถุผลลัพธ์ (ถ้า keep = id ของสำเนาใหม่)
+    pub fn rotate_ids(&mut self, ids: &[u64], c: Point, ang: f64, keep: bool) -> Vec<u64> {
+        if !ang.is_finite() {
+            return Vec::new();
+        }
+        self.transform_ids_with(ids, keep, &|e| e.rotated(c, ang))
+    }
+
+    pub fn scale_ids(&mut self, ids: &[u64], c: Point, k: f64, keep: bool) -> Vec<u64> {
+        if !(k.is_finite() && k > 0.0) {
+            return Vec::new();
+        }
+        self.transform_ids_with(ids, keep, &|e| e.scaled(c, k))
+    }
+
+    /// ย่อ/ขยายวัตถุที่เลือกรอบจุด c ด้วยตัวคูณ k > 0
+    pub fn scale_selected(&mut self, c: Point, k: f64, keep: bool) -> usize {
+        if !(k.is_finite() && k > 0.0) {
+            return 0;
+        }
+        self.transform_selected_with(keep, &|e| e.scaled(c, k))
+    }
+
+    fn preview_with(&self, limit: usize, f: &dyn Fn(&ElementData) -> ElementData) -> Vec<ElementData> {
+        let sel: Vec<&DrawingElement> =
+            self.history.iter().filter(|e| e.is_selected).take(limit + 1).collect();
+        if sel.len() > limit {
+            return Vec::new();
+        }
+        sel.iter().map(|e| f(&e.data)).collect()
+    }
+
+    pub fn rotate_preview(&self, c: Point, ang: f64, limit: usize) -> Vec<ElementData> {
+        self.preview_with(limit, &|e| e.rotated(c, ang))
+    }
+
+    pub fn scale_preview(&self, c: Point, k: f64, limit: usize) -> Vec<ElementData> {
+        self.preview_with(limit, &|e| e.scaled(c, k))
     }
 
     /// กรอบรวมของวัตถุที่เลือก (แคชตาม sel_rev ไม่คำนวณซ้ำทุกเฟรม)
@@ -1933,6 +2349,7 @@ impl Engine {
         ids.into_iter()
             .filter_map(|id| self.index_of(id).map(|i| &self.history[i]))
             .filter(|e| self.layers[e.layer].visible)
+            .filter(|e| self.anim_hidden.is_empty() || !self.anim_hidden.contains(&e.id))
             .collect()
     }
 
@@ -1943,6 +2360,7 @@ impl Engine {
         self.sel_rev.hash(&mut h);
         self.history.len().hash(&mut h);
         self.id_counter.hash(&mut h);
+        self.anim_hidden.hash(&mut h);
         if self.apply_anim.is_playing {
             self.apply_anim.timer.to_bits().hash(&mut h);
         }

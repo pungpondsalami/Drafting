@@ -4,16 +4,19 @@
 
 A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows developer preview is also available.
 
-![Drafting Screenshot](docs/Drafting-preview-22-10-2026.png)
+![Drafting Screenshot](docs/Drafting-preview-28-10-2026.png)
 
 ## Features
 
 - Draw lines, circles, 3-point arcs, polylines and linear dimensions
 - Object snap: endpoint, midpoint, center, quadrant and intersection, each toggleable from the snap settings dock
 - Grid snapping with adaptive LOD grid (snaps to every minor grid step)
-- Ortho mode (`F8` or the Ortho button): lock lines, polylines, dimensions and the mirror axis to horizontal or vertical; object snap overrides it
-- Offset (line, circle, arc, polyline) with preview
+- Ortho mode (`F8` or the Ortho button): lock lines, polylines, dimensions, the mirror axis and the rotate angle to horizontal or vertical; object snap overrides it
+- Offset (line, circle, arc, polyline) with preview; the result is made on the click and a short animation plays over it
 - Mirror the selected objects across a line, with a live preview and a flip animation; keeps the originals, `Shift` deletes them. With more than 3000 objects selected the preview and animation show only the bounding box
+- Rotate and Scale the selected objects about a base point, with a live preview, the angle or factor shown on screen, or typed in the command bar; `Shift` keeps the originals
+- Fillet and Chamfer two straight lines, with a preview that shows the corner collapsing as you hover over the second line
+- Explode polylines into separate lines (`xp`)
 - Trim and Extend (line, arc, circle, polyline) with live preview; hold `Shift` to swap between the two
 - Hatch: click inside a closed area and the boundary is found for you (circles inside are left out); lines, cross or solid, with angle and spacing
 - Text: click a point and type in a box (several lines, height, rotation); double-click a text or a hatch to edit it
@@ -21,7 +24,7 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Layers: show/hide, lock and pick the current layer from the Layers panel (right dock, or the `la` command); new objects go on the current layer and are drawn in the layer's color
 - Multi-tab support, with an unsaved-changes prompt before closing
 - Open, Save and Save As for DXF files (the file path is remembered per tab); large files open in the background
-- Layouts: sheets with several viewports, each with its own scale (1:50, 1:100, ...), saved in the DXF and printed as one page
+- Model / Layout switch (AutoCAD style): sheets with several viewports, each with its own scale (1:50, 1:100, ...), saved in the DXF and printed as one page
 - Copy, cut and paste between drawings
 - Autosave: unsaved drawings are backed up every 2 minutes and offered back after a crash
 - Print (`Ctrl+P`): A0 to A4 or Letter, landscape or portrait, the current view or everything, fit to page or a fixed scale (1:1 to 1:500); choose a printer or save a PDF
@@ -143,11 +146,13 @@ cargo run
 | `Delete` | Delete the selected objects |
 | `S` | Select mode |
 | `Z` | Zoom to cursor |
-| `Ctrl` + `F` | Zoom to fit |
+| `Ctrl` + `F` | Zoom to fit (in a layout: fit the sheet) |
 | `F8` | Toggle Ortho |
 | `F9` | Toggle Snap |
 | `Ctrl` + `P` | Print |
 | `Ctrl` + `C` / `X` / `V` | Copy / Cut / Paste (`Ctrl` + `Shift` + `V` pastes in place) |
+
+Rotate, Scale, Mirror, Fillet, Chamfer and Explode have no single-key shortcut; use the buttons or the command bar. In a layout the single-key tool shortcuts are off.
 
 ## Command Bar
 
@@ -163,6 +168,11 @@ Type commands in the command bar at the bottom:
 | `tr`, `trim` | Trim tool |
 | `ex`, `extend` | Extend tool |
 | `mi`, `mirror` | Mirror the selected objects (select first) |
+| `ro`, `rotate` | Rotate the selected objects (select first) |
+| `sc`, `scale` | Scale the selected objects (select first) |
+| `f`, `fillet`, `f [radius]` | Fillet two lines |
+| `ch`, `chamfer`, `ch [dist]` | Chamfer two lines |
+| `xp`, `explode` | Explode the selected polylines into lines |
 | `h`, `hatch` | Hatch tool |
 | `tx`, `text` | Text tool |
 | `del`, `delete`, `erase` | Delete the selected objects |
@@ -179,18 +189,26 @@ Type commands in the command bar at the bottom:
 | `save` | Save |
 | `saveas` | Save As |
 | `print`, `plot` | Print |
-| `layout`, `lay` | Open or create layouts for the current drawing |
+| `layout`, `lay` | Switch between Model and the drawing's layouts |
 | `copy`, `cut`, `paste` | Copy, cut and paste objects |
+
+In a layout only the file and clipboard commands (`layout`, `print`, `save`, `saveas`, `open`, `copy`, `cut`, `paste`) are accepted.
+
+## Model and Layout
+
+The button beside Save shows or hides a strip at the bottom of the window: **Model** | your layouts | **+**. Click a name to switch; the strip appears by itself when a file has layouts. Right-click a layout's name to delete it. Switching to another file returns to Model.
+
+While a layout is shown the drawing tools, Undo/Redo and the single-key shortcuts are off, so nothing can change the hidden model by accident.
 
 ## Layouts and viewports
 
-A **Layout** is a sheet of paper that looks into your drawing through one or more **viewports**, each at its own scale. Layouts are saved in the DXF file (as real paper-space layouts with viewports) and open again as tabs next to the drawing.
+A **Layout** is a sheet of paper that looks into your drawing through one or more **viewports**, each at its own scale. Layouts are saved in the DXF file (as real paper-space layouts with viewports) and are listed in the bottom strip.
 
-- Type `layout` (or `lay`) to open the drawing's layouts that are not open, or to make a new one when they all are. **New Layout** and **Delete Layout** are also in the layout's toolbar. A new layout is A3 landscape; change it with the Paper and Orientation boxes.
-- **New Viewport**, then drag a rectangle on the sheet. The viewport shows what the drawing tab is showing right now, at the nearest standard scale that fits it. So the quick way to place an area is: zoom the drawing tab to the part you want, switch to the layout, and drag the frame.
+- Click **+** in the strip (or type `layout` when the drawing has none) to make a new layout. **New Layout** and **Delete Layout** are also in the layout's toolbar. A new layout is A3 landscape; change it with the Paper and Orientation boxes.
+- **New Viewport**, then drag a rectangle on the sheet. The viewport shows what the Model is showing right now, at the nearest standard scale that fits it. So the quick way to place an area is: zoom the Model to the part you want, switch to the layout, and drag the frame.
 - Click a viewport to select it. Drag it to move it; drag its bottom-right square to resize it (the contents stay where they are on the sheet).
-- **Scale** sets 1:1 up to 1:1000, or 10:1 to 2:1 for enlarged details. **From Drawing View** refills the selected viewport from the drawing tab's current view.
-- **Edit Inside** lets you drag inside a viewport to pan the drawing, and scroll to step the scale. With it off, scroll zooms the sheet and the middle button pans the sheet. **Fit** shows the whole sheet.
+- **Scale** sets 1:1 up to 1:1000, or 10:1 to 2:1 for enlarged details. **From Drawing View** refills the selected viewport from the Model's current view.
+- **Edit Inside** lets you drag inside a viewport to pan the drawing, and scroll to step the scale. With it off, scroll zooms the sheet and the middle button pans the sheet. **Fit** (or `Ctrl+F`) shows the whole sheet.
 - `Delete` removes the selected viewport, `Esc` cancels or deselects.
 - **Print…** (or `Ctrl+P`) prints the sheet at its real size; the **Lines** box chooses layer colours or all black.
 - `Ctrl+V` in a layout pastes what you copied from the drawing onto the sheet, centred at the pointer, at 1:1 (1 mm in the drawing = 1 mm on paper). Use it for title blocks, notes and frames. Click a pasted group to select it, drag to move it, drag the square at its bottom-right corner to scale it (or use **Scale Objects…** to type a factor), `Delete` removes it. `Ctrl+C` on a selected group or viewport copies it; pasting a viewport makes another one. Things on the sheet are saved in the DXF too, but come back as separate objects (not groups).
@@ -228,13 +246,36 @@ The next window picks the printer, or "Print to File" for a PDF. Line weights pr
 
 Select objects, then start Mirror (`mi` or the Mirror button). Click two points for the mirror line. The originals are kept; hold `Shift` on the second click to delete them. Text is moved to its mirrored position but its letters are not flipped (like AutoCAD with `MIRRTEXT` = 0). Ortho and object snap work for the axis points.
 
+## Rotate and Scale
+
+Select objects, then start Rotate (`ro`) or Scale (`sc`), or press their buttons in the right dock. With nothing selected the tool does not start and a hint is shown.
+
+1. Click the **base point** (object snap works).
+2. **Rotate**: move the mouse; the angle (direction from the base point to the pointer, 0° = right, counter-clockwise) is shown at the top and a preview follows. Click to confirm, or type degrees in the command bar and press Enter. Ortho locks the angle to 0/90/180/270°.
+3. **Scale**: the factor is the pointer's distance from the base point in screen pixels divided by 100 (100 px = ×1). Click to confirm, or type a factor (for example `2` or `0.5`) and press Enter.
+
+Hold `Shift` while confirming to keep the originals and make a rotated or scaled copy. Text height, circle and arc radius, dimension offsets and hatch spacing scale with the objects; hatch angles rotate with them. With more than 3000 objects selected the preview shows only the bounding box. The change is applied at once and the animation is only played over it.
+
+## Fillet and Chamfer
+
+Start Fillet (`f`, or `f 5` to set the radius) or Chamfer (`ch`, or `ch 5` to set the distance), click the first line, then the second. While the pointer is over the second line a preview shows the corner collapsing into the result; move away and it relaxes back.
+
+- The part of each line you clicked is the part that is kept; the rest beyond the corner is cut away. Lines that do not reach each other are extended to meet.
+- A fillet of radius 0 simply joins the two lines at their corner. In Fillet or Chamfer mode you can type a new number in the command bar at any time.
+- Only straight lines are supported. For polylines (for example a rectangle from a DXF file) select them and run `xp` first.
+- "Lines are too short for this size" means the radius or distance is larger than what the lines allow; "Lines are parallel" means they never meet.
+
+## Explode
+
+Select polylines and type `xp` (or `explode`). Each polyline becomes separate lines, on the same layer and with the same colour and line style; a closed polyline gets its closing line too. The new lines stay selected and the step can be undone.
+
 ## Hatch
 
 Pick Hatch (`H`, `hatch` or the button in the right dock), choose Lines, Cross or Solid with the angle and spacing in the panel, then click inside a closed area. Drafting finds the boundary from the lines, circles, arcs and polylines around the click (hidden layers are ignored) and fills it. Stay in the tool to hatch more areas; `Esc` leaves it.
 
 - Circles and closed polylines inside the area are left unhatched as islands. Islands made of separate lines are only found when they lie to the right of the click on the same row.
 - A hatch is its own object: if you move or trim the boundary afterwards, the hatch stays where it was.
-- Double-click a hatch (in Select mode) to change its pattern, angle or spacing. Mirror turns the pattern angle too.
+- Double-click a hatch (in Select mode) to change its pattern, angle or spacing. Mirror and Rotate turn the pattern angle too.
 - Lines closer than 3 px on screen are drawn as a solid area.
 - DXF: a hatch is saved as separate lines, so after reopening the file it is just lines. A hatch that comes from a DXF file is still opened as a plain outline or solid area.
 
@@ -257,6 +298,9 @@ Open the panel with the layers button in the right dock (or type `la`).
 
 ## Limitations
 
+- Fillet and Chamfer work on two straight lines only (use `xp` to break a polyline into lines first); arcs and circles are not supported.
+- Rotate and Scale have no "reference" option, and the scale factor from a click depends on screen pixels, so type the factor when you need an exact value.
+- In a layout, Undo/Redo is not available and a layout cannot be renamed.
 - MText formatting (bold, italic, colors, mixed sizes) is dropped; only plain text is kept.
 - Block inserts are exploded when a file is opened, so they are saved as plain objects.
 - Dimensions from a file are plain lines and text, not editable dimensions.

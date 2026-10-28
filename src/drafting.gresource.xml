@@ -29,5 +29,9 @@
     <file>icons/hatch-symbolic.svg</file>
     <file>icons/text-t-symbolic.svg</file>
     <file>icons/dashed-rectanngle-symbolic.svg</file>
+    <file>icons/rotate-cw-symbolic.svg</file>
+    <file>icons/transform-scale-symbolic.svg</file>
+    <file>icons/corner-fillet-symbolic.svg</file>
+    <file>icons/corner-chamfer-symbolic.svg</file>
   </gresource>
 </gresources>

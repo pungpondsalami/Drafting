@@ -52,11 +52,37 @@ pub struct MirrorAnim {
     pub start_us: Option<i64>,
     pub t: f64, // 0.0 → 1.0
 }
+const XFORM_ANIM_SECS: f64 = 0.3;
+const CORNER_ANIM_SECS: f64 = 0.12; // fade ของ ghost หลังคลิก
+const CORNER_PREVIEW_SECS: f64 = 0.15; // มุมยุบตอนพรีวิว
+
+/// แอนิเมชัน Rotate / Scale ตอนยืนยัน (ghost ขยับ แล้วค่อยแปลงจริงเมื่อจบ)
+#[derive(Debug, Clone)]
+pub struct XformAnim {
+    pub rotate: bool, // false = scale
+    pub ids: Vec<u64>,
+    pub base: (f64, f64),
+    pub value: f64, // มุม (เรเดียน) หรือตัวคูณ
+    pub keep: bool,
+    pub boxed: bool,
+    pub start_us: Option<i64>,
+    pub t: f64,
+}
+/// พรีวิว Fillet / Chamfer ตอนเมาส์อยู่บนเส้นที่สอง
+#[derive(Debug, Clone)]
+pub struct CornerPrev {
+    pub info: crate::engine::CornerInfo,
+    pub key: (u64, i32, i32), // เส้นที่สอง + ฝั่งที่เก็บ: เปลี่ยนแล้วเล่นแอนิเมชันใหม่
+    pub last_us: Option<i64>,
+    pub t: f64,   // 0 = มุมเดิม, 1 = ผลลัพธ์เต็ม
+    pub dir: f64, // +1 ยุบเข้าหาผลลัพธ์, -1 คลายกลับ (เมาส์ออกจากเส้น)
+}
 const OFFSET_FLIP_SECS: f64 = 0.04;
 
 #[derive(Debug, Clone, Copy)]
 pub struct OffsetAnim {
     pub source: u64,
+    pub new_id: u64, // วัตถุที่ offset ได้ (ซ่อนไว้ระหว่างแอนิเมชัน)
     pub side: (f64, f64),
     pub dist: f64,
     pub start_us: Option<i64>,
@@ -76,6 +102,9 @@ mod imp {
     pub struct DraftingWindow {
         #[template_child]
         pub tab_view: TemplateChild<adw::TabView>,
+        pub layout_view: std::cell::OnceCell<adw::TabView>,
+        pub mode_stack: std::cell::OnceCell<gtk::Stack>,
+        pub mode_strip: std::cell::OnceCell<gtk::Box>,
         #[template_child]
         pub btn_line: TemplateChild<gtk::Button>,
         #[template_child]
@@ -135,7 +164,7 @@ mod imp {
         #[template_child]
         pub btn_polyline: TemplateChild<gtk::Button>,
         #[template_child]
-        pub btn_layout: TemplateChild<gtk::Button>,
+        pub btn_layout: TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub btn_select: TemplateChild<gtk::Button>,
         #[template_child]
@@ -156,6 +185,14 @@ mod imp {
         pub btn_extend: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_mirror: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_rotate: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_scale: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_fillet: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_chamfer: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_hatch: TemplateChild<gtk::Button>,
         #[template_child]
@@ -218,6 +255,13 @@ mod imp {
         pub offset_phase: Cell<u8>,
         pub shift_down: Cell<bool>,
         pub mirror_anim: RefCell<Option<MirrorAnim>>,
+        pub xform_anim: RefCell<Option<XformAnim>>,
+        pub corner_first: Cell<Option<(u64, (f64, f64))>>,
+        pub corner_prev: RefCell<Option<CornerPrev>>,
+        pub corner_hidden: Cell<bool>,
+        pub corner_anim: RefCell<Option<(crate::engine::CornerInfo, Option<i64>, f64)>>,
+        pub fillet_r: Cell<f64>,
+        pub chamfer_d: Cell<f64>,
         pub ortho: Cell<bool>,
         pub cursor_size: Cell<f64>,
         /// เซฟสำรองอัตโนมัติ: id ไฟล์สำรองของแต่ละแท็บ + สถานะที่เซฟล่าสุด
@@ -273,6 +317,8 @@ mod imp {
             self.current_mode.set(DrawingMode::Select);
             self.auto_pan_enabled.set(true);
             self.offset_distance.set(self.spin_offset_dist.value());
+            self.fillet_r.set(5.0);
+            self.chamfer_d.set(5.0);
 
             // สร้าง Controller สำหรับดักคีย์บอร์ดระดับ Window
             let key_ctrl = gtk::EventControllerKey::new();
@@ -352,6 +398,10 @@ mod imp {
                     if obj.layout_key(key) {
                         return glib::Propagation::Stop;
                     }
+                    // โหมด Layout: ปุ่มอักษรเดี่ยว (คีย์ลัดเครื่องมือ) ต้องไม่ไปทำงานกับแบบที่ซ่อนอยู่
+                    if obj.layout_mode() && !typing && !is_ctrl && key.to_unicode().is_some() {
+                        return glib::Propagation::Stop;
+                    }
 
                     // Cancel Action: Esc
                     if key == gdk::Key::Escape {
@@ -367,6 +417,9 @@ mod imp {
 
                     // Zoom to Fit: Ctrl + F
                     if is_ctrl && (key == gdk::Key::f || key == gdk::Key::F) {
+                        if obj.layout_fit() {
+                            return glib::Propagation::Stop;
+                        }
                         if let Some(page) = obj.imp().tab_view.selected_page() {
                             let pages = obj.imp().pages.borrow();
                             if let Some(d_ref) = pages.get(&page) {
@@ -605,6 +658,8 @@ mod imp {
                 }
             ));
 
+            obj.setup_layout_mode();
+
             // ลบ Tab
             self.tab_view.connect_close_page(glib::clone!(
                 #[weak]
@@ -659,9 +714,8 @@ mod imp {
                 #[weak]
                 obj,
                 move |_| {
+                    obj.clear_pending_state();
                     obj.imp().current_mode.set(DrawingMode::Dimension);
-                    obj.imp().dimension_step.set(0); // เริ่มนับหนึ่งใหม่
-                    obj.imp().start_pos.set(None);
                 }
             ));
 
@@ -688,12 +742,6 @@ mod imp {
                 move |_, _| obj.layout_command()
             ));
             obj.add_action(&layout_action);
-
-            self.btn_layout.connect_clicked(glib::clone!(
-                #[weak]
-                obj,
-                move |_| obj.layout_command()
-            ));
 
             self.btn_line.connect_clicked(glib::clone!(
                 #[weak]
@@ -871,6 +919,30 @@ mod imp {
                 move |_| obj.set_tool(DrawingMode::Mirror)
             ));
 
+            self.btn_rotate.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Rotate)
+            ));
+
+            self.btn_scale.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Scale)
+            ));
+
+            self.btn_fillet.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Fillet)
+            ));
+
+            self.btn_chamfer.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Chamfer)
+            ));
+
             self.btn_hatch.connect_clicked(glib::clone!(
                 #[weak]
                 obj,
@@ -900,6 +972,18 @@ mod imp {
                 move |entry| {
                     let text = entry.text().to_string().to_lowercase().trim().to_string();
 
+                    // โหมด Layout: ยอมเฉพาะคำสั่งระดับไฟล์/คลิปบอร์ด (ก่อนตัวจัดการคำสั่งเครื่องมือทั้งหมด)
+                    if obj.layout_mode()
+                        && !matches!(
+                            text.as_str(),
+                            "layout" | "lay" | "print" | "plot" | "save" | "saveas" | "o" | "open"
+                                | "copy" | "cut" | "paste"
+                        )
+                    {
+                        entry.set_text("");
+                        return;
+                    }
+
                     // offset / of [ระยะ]  หรือพิมพ์ตัวเลขล้วนตอนอยู่ในโหมด Offset
                     {
                         let mut parts = text.split_whitespace();
@@ -912,11 +996,34 @@ mod imp {
                                 page.child().queue_draw();
                             }
                             true
+                        } else if matches!(first, "f" | "fillet" | "ch" | "chamfer") {
+                            let chamfer = first.starts_with("ch");
+                            obj.set_tool(if chamfer { DrawingMode::Chamfer } else { DrawingMode::Fillet });
+                            if let Some(v) = parts.next().and_then(|s| s.parse::<f64>().ok()) {
+                                obj.set_corner_value(chamfer, v);
+                            }
+                            true
+                        } else if matches!(
+                            obj.imp().current_mode.get(),
+                            DrawingMode::Fillet | DrawingMode::Chamfer
+                        ) && text.parse::<f64>().is_ok()
+                        {
+                            let chamfer = obj.imp().current_mode.get() == DrawingMode::Chamfer;
+                            obj.set_corner_value(chamfer, text.parse::<f64>().unwrap_or(0.0));
+                            true
                         } else if first == "of" || first == "offset" {
                             obj.set_tool(DrawingMode::Offset);
                             if let Some(v) = parts.next().and_then(|s| s.parse::<f64>().ok()) {
                                 obj.set_offset_distance(v);
                             }
+                            true
+                        } else if matches!(
+                            obj.imp().current_mode.get(),
+                            DrawingMode::Rotate | DrawingMode::Scale
+                        ) && obj.imp().start_pos.get().is_some()
+                            && text.parse::<f64>().is_ok()
+                        {
+                            obj.apply_typed_transform(text.parse::<f64>().unwrap_or(0.0));
                             true
                         } else if obj.imp().current_mode.get() == DrawingMode::Offset {
                             match text.parse::<f64>() {
@@ -940,6 +1047,17 @@ mod imp {
 
                     if let Some(page) = obj.imp().tab_view.selected_page() {
                         let (w, h) = (page.child().width() as f64, page.child().height() as f64);
+
+                        // โหมด Layout: ยอมเฉพาะคำสั่งระดับไฟล์/คลิปบอร์ด
+                        let allowed_in_layout = matches!(
+                            text.as_str(),
+                            "layout" | "lay" | "print" | "plot" | "save" | "saveas" | "o" | "open"
+                                | "copy" | "cut" | "paste"
+                        );
+                        if obj.layout_mode() && !allowed_in_layout {
+                            entry.set_text("");
+                            return;
+                        }
 
                         match text.as_str() {
                             "fit" => {
@@ -986,9 +1104,19 @@ mod imp {
                             "tr" | "trim" => obj.set_tool(DrawingMode::Trim),
                             "ex" | "extend" => obj.set_tool(DrawingMode::Extend),
                             "mi" | "mirror" => obj.set_tool(DrawingMode::Mirror),
+                            "ro" | "rotate" => obj.set_tool(DrawingMode::Rotate),
+                            "sc" | "scale" => obj.set_tool(DrawingMode::Scale),
                             "h" | "hatch" => obj.set_tool(DrawingMode::Hatch),
                             "tx" | "text" => obj.set_tool(DrawingMode::Text),
                             "del" | "delete" | "erase" => obj.delete_action(),
+                            "xp" | "explode" => {
+                                let n = obj.with_engine(|d| d.explode_selected()).unwrap_or(0);
+                                *obj.imp().offset_msg.borrow_mut() = if n == 0 {
+                                    "Select polylines first, then EXPLODE (XP)".to_string()
+                                } else {
+                                    format!("Exploded {} polyline(s) into lines", n)
+                                };
+                            }
                             "la" | "layer" | "layers" => {
                                 let b = &obj.imp().btn_layers;
                                 b.set_active(!b.is_active());
@@ -1037,8 +1165,9 @@ mod imp {
                 #[weak]
                 obj,
                 move |_| {
+                    obj.clear_pending_state();
                     obj.refresh_layers();
-                    obj.sync_layout_chrome();
+                    obj.mode_file_changed();
                 }
             ));
 
@@ -1101,8 +1230,8 @@ mod imp {
                 #[weak]
                 obj,
                 move |_| {
+                    obj.clear_pending_state();
                     obj.imp().current_mode.set(DrawingMode::Line);
-                    obj.imp().start_pos.set(None); // ล้างพิกัดเก่าทิ้ง
                 }
             ));
 
@@ -1110,8 +1239,8 @@ mod imp {
                 #[weak]
                 obj,
                 move |_| {
+                    obj.clear_pending_state();
                     obj.imp().current_mode.set(DrawingMode::Circle);
-                    obj.imp().start_pos.set(None);
                 }
             ));
         }
@@ -1128,11 +1257,87 @@ impl DraftingWindow {
         glib::Object::builder().property("application", app).build()
     }
 
+    /// ล้างสถานะเครื่องมือที่ค้างอยู่ (จุดแรก, วัตถุที่เลือกไว้, พรีวิว) — ใช้ตอนสลับไฟล์/เปลี่ยนเครื่องมือด้วยปุ่ม
+    fn clear_pending_state(&self) {
+        let imp = self.imp();
+        imp.start_pos.set(None);
+        imp.corner_first.set(None);
+        imp.offset_source.set(None);
+        imp.pending_points.borrow_mut().clear();
+        imp.dimension_step.set(0);
+        imp.dim_temp_start.set(None);
+        imp.dim_temp_end.set(None);
+        *imp.corner_prev.borrow_mut() = None;
+    }
+
+    /// ตั้งค่ารัศมี Fillet / ระยะ Chamfer
+    fn set_corner_value(&self, chamfer: bool, v: f64) {
+        let imp = self.imp();
+        if !v.is_finite() || v < 0.0 || (chamfer && v <= 0.0) {
+            *imp.offset_msg.borrow_mut() = "Value must be greater than 0".into();
+            return;
+        }
+        if chamfer {
+            imp.chamfer_d.set(v);
+        } else {
+            imp.fillet_r.set(v);
+        }
+        imp.offset_msg.borrow_mut().clear();
+        if let Some(page) = imp.tab_view.selected_page() {
+            page.child().queue_draw();
+        }
+    }
+
+    /// พิมพ์องศา/ตัวคูณใน command bar ตอน Rotate / Scale (หลังคลิกจุดฐานแล้ว)
+    fn apply_typed_transform(&self, v: f64) {
+        let imp = self.imp();
+        let mode = imp.current_mode.get();
+        let Some((bx, by)) = imp.start_pos.get() else { return };
+        let copy = imp.shift_down.get();
+        let ids: Vec<u64> = self
+            .with_engine(|d| d.history.iter().filter(|e| e.is_selected).map(|e| e.id).collect())
+            .unwrap_or_default();
+        let rotate = mode == DrawingMode::Rotate;
+        let value = if rotate { v.to_radians() } else { v };
+        let valid = value.is_finite() && (rotate || value > 0.0);
+        if valid && !ids.is_empty() && imp.xform_anim.borrow().is_none() {
+            let c = Point { x: bx, y: by };
+            let many = ids.len() > 3000;
+            let out = self
+                .with_engine(|d| {
+                    let out = if rotate {
+                        d.rotate_ids(&ids, c, value, copy)
+                    } else {
+                        d.scale_ids(&ids, c, value, copy)
+                    };
+                    if !many {
+                        d.anim_hidden = out.clone();
+                    }
+                    out
+                })
+                .unwrap_or_default();
+            if !out.is_empty() && (!many || !copy) {
+                *imp.xform_anim.borrow_mut() = Some(XformAnim {
+                    rotate,
+                    boxed: many,
+                    ids: if many { Vec::new() } else { out },
+                    base: (bx, by),
+                    value,
+                    keep: copy,
+                    start_us: None,
+                    t: 0.0,
+                });
+            }
+        }
+        imp.start_pos.set(None);
+        imp.current_mode.set(DrawingMode::Select);
+    }
+
     pub fn set_tool(&self, mode: DrawingMode) {
         let imp = self.imp();
         let mut mode = mode;
         let mut hint = String::new();
-        if mode == DrawingMode::Mirror {
+        if matches!(mode, DrawingMode::Mirror | DrawingMode::Rotate | DrawingMode::Scale) {
             let any = imp
                 .tab_view
                 .selected_page()
@@ -1144,8 +1349,13 @@ impl DraftingWindow {
                 })
                 .unwrap_or(false);
             if !any {
+                hint = match mode {
+                    DrawingMode::Rotate => "Select objects first, then Rotate (RO)",
+                    DrawingMode::Scale => "Select objects first, then Scale (SC)",
+                    _ => "Select objects first, then Mirror (MI)",
+                }
+                .to_string();
                 mode = DrawingMode::Select;
-                hint = "Select objects first, then Mirror (MI)".to_string();
             }
         }
         imp.current_mode.set(mode);
@@ -1153,6 +1363,7 @@ impl DraftingWindow {
         imp.dimension_step.set(0);
         imp.pending_points.borrow_mut().clear();
         imp.offset_source.set(None);
+        imp.corner_first.set(None);
         *imp.offset_anim.borrow_mut() = None;
         imp.offset_stable.set(None);
         imp.offset_k.set(1.0);
@@ -1259,7 +1470,7 @@ impl DraftingWindow {
             }
         }
 
-        let buttons: [(&gtk::Button, DrawingMode); 13] = [
+        let buttons: [(&gtk::Button, DrawingMode); 17] = [
             (&imp.btn_select, DrawingMode::Select),
             (&imp.btn_line, DrawingMode::Line),
             (&imp.btn_circle, DrawingMode::Circle),
@@ -1271,6 +1482,10 @@ impl DraftingWindow {
             (&imp.btn_trim, DrawingMode::Trim),
             (&imp.btn_extend, DrawingMode::Extend),
             (&imp.btn_mirror, DrawingMode::Mirror),
+            (&imp.btn_rotate, DrawingMode::Rotate),
+            (&imp.btn_scale, DrawingMode::Scale),
+            (&imp.btn_fillet, DrawingMode::Fillet),
+            (&imp.btn_chamfer, DrawingMode::Chamfer),
             (&imp.btn_hatch, DrawingMode::Hatch),
             (&imp.btn_text, DrawingMode::Text),
         ];
@@ -1292,6 +1507,7 @@ impl DraftingWindow {
         imp.start_pos.set(None);
         imp.pending_points.borrow_mut().clear();
         imp.offset_source.set(None);
+        imp.corner_first.set(None);
         *imp.offset_anim.borrow_mut() = None;
         imp.offset_fade.set(0.0);
         imp.offset_msg.borrow_mut().clear();
@@ -1583,29 +1799,119 @@ impl DraftingWindow {
                         area.queue_draw();
                     }
 
+                    // Rotate / Scale: เดินเวลา แล้วแปลงจริงตอนจบ
+                    let mut xform_done: Option<XformAnim> = None;
+                    {
+                        let mut slot = obj.imp().xform_anim.borrow_mut();
+                        let is_current =
+                            obj.imp().tab_view.selected_page().as_ref() == Some(&page);
+                        if let Some(m) = slot.as_mut().filter(|_| is_current) {
+                            let now = clock.frame_time();
+                            let start = *m.start_us.get_or_insert(now);
+                            m.t = ((now - start) as f64 / 1_000_000.0 / XFORM_ANIM_SECS).min(1.0);
+                            let finished = m.t >= 1.0;
+                            if finished {
+                                xform_done = slot.take();
+                            }
+                            area.queue_draw();
+                        }
+                    }
+                    if xform_done.is_some() {
+                        d.anim_hidden.clear();
+                        area.queue_draw();
+                    }
+
+                    // Fillet / Chamfer: มุมยุบ
+                    let mut corner_done = false;
+                    {
+                        let mut slot = obj.imp().corner_anim.borrow_mut();
+                        if let Some((_, start, t)) = slot.as_mut() {
+                            let now = clock.frame_time();
+                            let s0 = *start.get_or_insert(now);
+                            *t = ((now - s0) as f64 / 1_000_000.0 / CORNER_ANIM_SECS).min(1.0);
+                            if *t >= 1.0 {
+                                corner_done = true;
+                            }
+                            area.queue_draw();
+                        }
+                        if corner_done {
+                            *slot = None;
+                        }
+                    }
+                    if corner_done {
+                        area.queue_draw();
+                    }
+                    // พรีวิว Fillet/Chamfer: ซ่อนเส้นเดิมสองเส้นไว้ ให้เห็นแต่ ghost
+                    {
+                        let want: Option<Vec<u64>> =
+                            obj.imp().corner_prev.borrow().as_ref().map(|p| p.info.ids.clone());
+                        match want {
+                            Some(ids) => {
+                                if d.anim_hidden != ids {
+                                    d.anim_hidden = ids;
+                                    area.queue_draw();
+                                }
+                                obj.imp().corner_hidden.set(true);
+                            }
+                            None => {
+                                if obj.imp().corner_hidden.replace(false) {
+                                    d.anim_hidden.clear();
+                                    area.queue_draw();
+                                }
+                            }
+                        }
+                    }
+                    {
+                        let mut slot = obj.imp().corner_prev.borrow_mut();
+                        let mut drop_it = false;
+                        if let Some(p) = slot.as_mut() {
+                            let animating = if p.dir > 0.0 { p.t < 1.0 } else { true };
+                            if animating {
+                                let now = clock.frame_time();
+                                let dt = p
+                                    .last_us
+                                    .map_or(0.0, |l| ((now - l) as f64 / 1_000_000.0).min(0.1));
+                                p.last_us = Some(now);
+                                p.t = (p.t + p.dir * dt / CORNER_PREVIEW_SECS).clamp(0.0, 1.0);
+                                if p.dir < 0.0 && p.t <= 0.0 {
+                                    drop_it = true; // คลายจนกลับเป็นของเดิมแล้ว
+                                }
+                                area.queue_draw();
+                            } else {
+                                p.last_us = None;
+                            }
+                        }
+                        if drop_it {
+                            *slot = None;
+                        }
+                    }
+
                     let anim_copy = *obj.imp().offset_anim.borrow();
                     if let Some(mut a) = anim_copy {
                         let now = clock.frame_time();
                         let start = a.start_us.unwrap_or(now);
                         a.start_us = Some(start);
                         a.t = ((now - start) as f64 / 1_000_000.0 / OFFSET_ANIM_SECS).min(1.0);
-                        const OFFSET_FLIP_SECS: f64 = 0.09;
 
                         if a.t >= 1.0 {
-                            let side = Point { x: a.side.0, y: a.side.1 };
-                            match d.offset_apply(a.source, side, a.dist) {
-                                Ok(()) => {
-                                    d.deselect_all();
-                                    obj.imp().offset_source.set(None);
-                                    obj.imp().offset_msg.borrow_mut().clear();
-                                    obj.imp().offset_fade.set(0.0);
-                                }
-                                Err(msg) => *obj.imp().offset_msg.borrow_mut() = msg.into(),
-                            }
+                            // แอนิเมชันจบ: โชว์วัตถุจริงที่ทำไว้แล้วตั้งแต่ตอนคลิก
+                            d.anim_hidden.retain(|&i| i != a.new_id);
                             *obj.imp().offset_anim.borrow_mut() = None;
                         } else {
                             *obj.imp().offset_anim.borrow_mut() = Some(a);
                         }
+                        area.queue_draw();
+                    }
+
+                    // กันวัตถุค้างซ่อน (เช่นยกเลิกเครื่องมือกลางแอนิเมชัน)
+                    if obj.imp().offset_anim.borrow().is_none()
+                        && obj.imp().xform_anim.borrow().is_none()
+                        && obj.imp().corner_anim.borrow().is_none()
+                        && obj.imp().corner_prev.borrow().is_none()
+                        && !obj.imp().corner_hidden.get()
+                        && !d.anim_hidden.is_empty()
+                    {
+                        d.anim_hidden.clear();
                         area.queue_draw();
                     }
 
@@ -1953,14 +2259,25 @@ impl DraftingWindow {
                             } else if let Some(id) = imp.offset_source.get() {
                                 let side = Point { x: wx, y: wy };
                                 if d.offset_preview(id, side, dist).is_some() {
-                                    *imp.offset_anim.borrow_mut() = Some(OffsetAnim {
-                                        source: id,
-                                        side: (wx, wy),
-                                        dist,
-                                        start_us: None,
-                                        t: 0.0,
-                                    });
-                                    imp.offset_msg.borrow_mut().clear();
+                                    // ทำจริงทันที แล้วเล่น ghost ทับระหว่างที่วัตถุใหม่ถูกซ่อน
+                                    match d.offset_apply_new(id, side, dist) {
+                                        Ok(new_id) => {
+                                            d.deselect_all();
+                                            d.anim_hidden = vec![new_id];
+                                            *imp.offset_anim.borrow_mut() = Some(OffsetAnim {
+                                                source: id,
+                                                new_id,
+                                                side: (wx, wy),
+                                                dist,
+                                                start_us: None,
+                                                t: 0.0,
+                                            });
+                                            imp.offset_source.set(None);
+                                            imp.offset_fade.set(0.0);
+                                            imp.offset_msg.borrow_mut().clear();
+                                        }
+                                        Err(msg) => *imp.offset_msg.borrow_mut() = msg.into(),
+                                    }
                                 } else if let Err(msg) = d.offset_apply(id, side, dist) {
                                     *imp.offset_msg.borrow_mut() = msg.into();
                                 }
@@ -2022,6 +2339,113 @@ impl DraftingWindow {
                                                 t: 0.0,
                                             });
                                         }
+                                        imp.start_pos.set(None);
+                                        imp.current_mode.set(DrawingMode::Select);
+                                    }
+                                }
+                            }
+                        }
+
+                        DrawingMode::Fillet | DrawingMode::Chamfer => {
+                            let chamfer = imp.current_mode.get() == DrawingMode::Chamfer;
+                            match d.corner_pick(wx, wy) {
+                                None => *imp.offset_msg.borrow_mut() = "Click on a straight line (EXPLODE polylines first: xp)".into(),
+                                Some(id) => match imp.corner_first.get() {
+                                    None => {
+                                        imp.corner_first.set(Some((id, (wx, wy))));
+                                        imp.offset_msg.borrow_mut().clear();
+                                    }
+                                    Some((id1, (x1, y1))) => {
+                                        let v = if chamfer {
+                                            imp.chamfer_d.get()
+                                        } else {
+                                            imp.fillet_r.get()
+                                        };
+                                        match d.corner_apply(
+                                            id1,
+                                            Point { x: x1, y: y1 },
+                                            id,
+                                            Point { x: wx, y: wy },
+                                            v,
+                                            chamfer,
+                                        ) {
+                                            Ok(info) => {
+                                                imp.corner_first.set(None);
+                                                imp.offset_msg.borrow_mut().clear();
+                                                // ทำจริงแล้ว: ghost ของพรีวิว fade หาย (ของจริงขึ้นมาทันที)
+                                                *imp.corner_prev.borrow_mut() = None;
+                                                if info.tdist > 1e-12 {
+                                                    *imp.corner_anim.borrow_mut() = Some((info, None, 0.0));
+                                                }
+                                            }
+                                            Err(m) => *imp.offset_msg.borrow_mut() = m.into(),
+                                        }
+                                    }
+                                },
+                            }
+                        }
+
+                        DrawingMode::Rotate | DrawingMode::Scale => {
+                            let rotate = imp.current_mode.get() == DrawingMode::Rotate;
+                            let (sx, sy, sk) = d.get_input_snap(
+                                wx,
+                                wy,
+                                imp.snap_enabled.get(),
+                                &imp.snap_settings.get(),
+                            );
+                            let (sx, sy) = if sk.is_none() && rotate {
+                                obj.ortho_apply((sx, sy))
+                            } else {
+                                (sx, sy)
+                            };
+                            match imp.start_pos.get() {
+                                None => imp.start_pos.set(Some((sx, sy))),
+                                Some((bx, by)) => {
+                                    let copy = gesture
+                                        .current_event_state()
+                                        .contains(gdk::ModifierType::SHIFT_MASK)
+                                        || imp.shift_down.get();
+                                    let dist = (sx - bx).hypot(sy - by);
+                                    let value = if rotate {
+                                        (sy - by).atan2(sx - bx)
+                                    } else {
+                                        dist * d.camera.scale / 100.0
+                                    };
+                                    let valid = if rotate { dist > 1e-9 } else { value > 1e-3 };
+                                    let ids: Vec<u64> = d
+                                        .history
+                                        .iter()
+                                        .filter(|e| e.is_selected)
+                                        .map(|e| e.id)
+                                        .collect();
+                                    let done =
+                                        valid && !ids.is_empty() && imp.xform_anim.borrow().is_none();
+                                    if done {
+                                        // ทำจริงทันที แล้วเล่นแอนิเมชันย้อนจากสภาพเดิมไปสภาพใหม่
+                                        let c = Point { x: bx, y: by };
+                                        let many = ids.len() > 3000;
+                                        let out = if rotate {
+                                            d.rotate_ids(&ids, c, value, copy)
+                                        } else {
+                                            d.scale_ids(&ids, c, value, copy)
+                                        };
+                                        if !out.is_empty() && (!many || !copy) {
+                                            if !many {
+                                                d.anim_hidden = out.clone();
+                                            }
+                                            *imp.xform_anim.borrow_mut() = Some(XformAnim {
+                                                rotate,
+                                                boxed: many,
+                                                ids: if many { Vec::new() } else { out },
+                                                base: (bx, by),
+                                                value,
+                                                keep: copy,
+                                                start_us: None,
+                                                t: 0.0,
+                                            });
+                                        }
+                                    }
+                                    if done {
                                         imp.start_pos.set(None);
                                         imp.current_mode.set(DrawingMode::Select);
                                     }
@@ -2397,7 +2821,8 @@ impl DraftingWindow {
                 DrawingMode::Trim => {}
                 DrawingMode::Extend => {}
                 DrawingMode::Hatch | DrawingMode::Text => {}
-                DrawingMode::Mirror => {
+                DrawingMode::Fillet | DrawingMode::Chamfer => {}
+                DrawingMode::Mirror | DrawingMode::Rotate | DrawingMode::Scale => {
                     let (psx, psy) = cam.world_to_screen(sx, sy);
                     let (pex, pey) = cam.world_to_screen(sn_x, sn_y);
                     cr.move_to(psx, psy);
@@ -2668,6 +3093,146 @@ impl DraftingWindow {
             let _ = cr.stroke();
         }
 
+        // --- Fillet / Chamfer: ไฮไลต์เส้นแรกที่เลือก ---
+        if matches!(imp.current_mode.get(), DrawingMode::Fillet | DrawingMode::Chamfer) {
+            if let (Some((id1, _)), true) =
+                (imp.corner_first.get(), imp.corner_prev.borrow().is_none())
+            {
+                cr.new_path();
+                for data in d.data_by_ids(&[id1]) {
+                    trace_ghost(cr, cam, data);
+                }
+                cr.set_source_rgba(1.0, 0.5, 0.0, 0.95);
+                cr.set_line_width(2.5);
+                let _ = cr.stroke();
+            }
+        }
+
+        // --- Fillet / Chamfer: พรีวิวผลลัพธ์ตอนเมาส์อยู่บนเส้นที่สอง ---
+        {
+            let mode = imp.current_mode.get();
+            let mut info: Option<crate::engine::CornerInfo> = None;
+            if matches!(mode, DrawingMode::Fillet | DrawingMode::Chamfer) {
+                if let Some((id1, (x1, y1))) = imp.corner_first.get() {
+                    if let Some(id2) = d.corner_pick(wx, wy).filter(|&i| i != id1) {
+                        let ch = mode == DrawingMode::Chamfer;
+                        let v = if ch { imp.chamfer_d.get() } else { imp.fillet_r.get() };
+                        match d.corner_preview(
+                            id1,
+                            Point { x: x1, y: y1 },
+                            id2,
+                            Point { x: wx, y: wy },
+                            v,
+                            ch,
+                        ) {
+                            Ok(i) => {
+                                info = Some(i);
+                                let has_msg = !imp.offset_msg.borrow().is_empty();
+                                if has_msg {
+                                    imp.offset_msg.borrow_mut().clear();
+                                }
+                            }
+                            Err(m) => *imp.offset_msg.borrow_mut() = m.into(),
+                        }
+                    }
+                }
+            }
+            let mut slot = imp.corner_prev.borrow_mut();
+            match info {
+                // เมาส์ออกจากเส้น: คลายกลับเป็นของเดิม (tick เป็นคนทิ้ง slot เมื่อคลายจบ)
+                None => {
+                    if let Some(p) = slot.as_mut() {
+                        if p.dir > 0.0 {
+                            p.dir = -1.0;
+                            p.last_us = None;
+                        }
+                    }
+                }
+                Some(i) => {
+                    let key = (
+                        i.ids[1],
+                        (i.u2.0 * 100.0).round() as i32,
+                        (i.u2.1 * 100.0).round() as i32,
+                    );
+                    match slot.as_mut() {
+                        Some(p) if p.key == key => {
+                            p.info = i;
+                            if p.dir < 0.0 {
+                                p.dir = 1.0; // กลับมาเส้นเดิมระหว่างคลาย: ยุบต่อจากตรงนั้น
+                                p.last_us = None;
+                            }
+                        }
+                        _ => {
+                            *slot = Some(CornerPrev { info: i, key, last_us: None, t: 0.0, dir: 1.0 })
+                        }
+                    }
+                }
+            }
+            if let Some(p) = slot.as_ref() {
+                let e = p.t * p.t * (3.0 - 2.0 * p.t);
+                cr.new_path();
+                for g in p.info.ghost(e) {
+                    trace_ghost(cr, cam, &g);
+                }
+                cr.set_source_rgba(1.0, 0.5, 0.0, 0.95);
+                cr.set_line_width(2.0);
+                let _ = cr.stroke();
+            }
+        }
+
+        // --- Fillet / Chamfer: มุมยุบ ---
+        if let Some((info, _, t)) = imp.corner_anim.borrow().as_ref() {
+            let fade = (1.0 - t).max(0.0);
+            cr.new_path();
+            for g in info.ghost(1.0) {
+                trace_ghost(cr, cam, &g);
+            }
+            cr.set_source_rgba(1.0, 0.5, 0.0, 0.9 * fade);
+            cr.set_line_width(1.5);
+            let _ = cr.stroke();
+        }
+
+        // --- Rotate / Scale animation ---
+        if let Some(m) = imp.xform_anim.borrow().as_ref() {
+            let e = m.t * m.t * (3.0 - 2.0 * m.t);
+            let c = Point { x: m.base.0, y: m.base.1 };
+            // วัตถุถูกแปลงจริงไปแล้ว: ghost เริ่มที่สภาพเดิม (ย้อนค่า) แล้วเลื่อนมาหาสภาพใหม่
+            let ang = if m.rotate { -m.value * (1.0 - e) } else { 0.0 };
+            let k = if m.rotate { 1.0 } else { m.value.max(1e-3).powf(-(1.0 - e)) };
+            cr.new_path();
+            if m.boxed {
+                if let Some((p0, p1)) = d.selection_bbox() {
+                    let (s, co) = ang.sin_cos();
+                    for (i, (x, y)) in [(p0.x, p0.y), (p1.x, p0.y), (p1.x, p1.y), (p0.x, p1.y)]
+                        .iter()
+                        .enumerate()
+                    {
+                        let (dx, dy) = (x - c.x, y - c.y);
+                        let (wx, wy) = if m.rotate {
+                            (c.x + dx * co - dy * s, c.y + dx * s + dy * co)
+                        } else {
+                            (c.x + dx * k, c.y + dy * k)
+                        };
+                        let (sx, sy) = cam.world_to_screen(wx, wy);
+                        if i == 0 {
+                            cr.move_to(sx, sy);
+                        } else {
+                            cr.line_to(sx, sy);
+                        }
+                    }
+                    cr.close_path();
+                }
+            } else {
+                for data in d.data_by_ids(&m.ids) {
+                    let g = if m.rotate { data.rotated(c, ang) } else { data.scaled(c, k) };
+                    trace_ghost(cr, cam, &g);
+                }
+            }
+            cr.set_source_rgba(1.0, 0.5, 0.0, 0.9);
+            cr.set_line_width(1.5);
+            let _ = cr.stroke();
+        }
+
         // --- Mirror ghost ---
         if imp.current_mode.get() == DrawingMode::Mirror {
             if let Some((ax, ay)) = imp.start_pos.get() {
@@ -2693,6 +3258,52 @@ impl DraftingWindow {
                             let r = crate::engine::reflect_point(Point { x: *x, y: *y }, la, lb);
                             let (sx, sy) = cam.world_to_screen(r.x, r.y);
                             if i == 0 { cr.move_to(sx, sy); } else { cr.line_to(sx, sy); }
+                        }
+                        cr.close_path();
+                    }
+                }
+                let _ = cr.stroke();
+            }
+        }
+
+        // --- Rotate / Scale ghost ---
+        if matches!(imp.current_mode.get(), DrawingMode::Rotate | DrawingMode::Scale) {
+            if let Some((bx, by)) = imp.start_pos.get() {
+                let c = Point { x: bx, y: by };
+                let dist = (sn_x - bx).hypot(sn_y - by);
+                let ghosts = if imp.current_mode.get() == DrawingMode::Rotate {
+                    d.rotate_preview(c, (sn_y - by).atan2(sn_x - bx), 3000)
+                } else {
+                    d.scale_preview(c, (dist * cam.scale / 100.0).max(1e-3), 3000)
+                };
+                cr.new_path();
+                cr.set_source_rgba(1.0, 0.5, 0.0, 0.7);
+                cr.set_line_width(1.5);
+                for g in &ghosts {
+                    trace_ghost(cr, cam, g);
+                }
+                // กรอบแทน ghost เมื่อเลือกเยอะจนไม่มี ghost (เหมือน Mirror)
+                if ghosts.is_empty() {
+                    if let Some((p0, p1)) = d.selection_bbox() {
+                        let rotate = imp.current_mode.get() == DrawingMode::Rotate;
+                        let (s, co) = (sn_y - by).atan2(sn_x - bx).sin_cos();
+                        let k = (dist * cam.scale / 100.0).max(1e-3);
+                        for (i, (x, y)) in [(p0.x, p0.y), (p1.x, p0.y), (p1.x, p1.y), (p0.x, p1.y)]
+                            .iter()
+                            .enumerate()
+                        {
+                            let (dx, dy) = (x - c.x, y - c.y);
+                            let (qx, qy) = if rotate {
+                                (c.x + dx * co - dy * s, c.y + dx * s + dy * co)
+                            } else {
+                                (c.x + dx * k, c.y + dy * k)
+                            };
+                            let (sx, sy) = cam.world_to_screen(qx, qy);
+                            if i == 0 {
+                                cr.move_to(sx, sy);
+                            } else {
+                                cr.line_to(sx, sy);
+                            }
                         }
                         cr.close_path();
                     }
@@ -2804,6 +3415,10 @@ impl DraftingWindow {
             DrawingMode::Trim => "TRIM",
             DrawingMode::Extend => "EXTEND",
             DrawingMode::Mirror => "MIRROR",
+            DrawingMode::Rotate => "ROTATE",
+            DrawingMode::Scale => "SCALE",
+            DrawingMode::Fillet => "FILLET",
+            DrawingMode::Chamfer => "CHAMFER",
             DrawingMode::Hatch => "HATCH",
             DrawingMode::Text => "TEXT",
         };
@@ -2822,6 +3437,38 @@ impl DraftingWindow {
                 "  click first point of mirror line".to_string()
             } else {
                 "  click second point | Shift: delete originals".to_string()
+            }
+        } else if matches!(imp.current_mode.get(), DrawingMode::Fillet | DrawingMode::Chamfer) {
+            let ch = imp.current_mode.get() == DrawingMode::Chamfer;
+            let val = if ch { imp.chamfer_d.get() } else { imp.fillet_r.get() };
+            let step = if imp.corner_first.get().is_none() {
+                "click first line"
+            } else {
+                "click second line"
+            };
+            let msg = imp.offset_msg.borrow();
+            let base = format!(
+                "  {} | {} = {} (type a value)",
+                step,
+                if ch { "distance" } else { "radius" },
+                val
+            );
+            if msg.is_empty() { base } else { format!("{} | {}", base, msg) }
+        } else if matches!(imp.current_mode.get(), DrawingMode::Rotate | DrawingMode::Scale) {
+            if imp.start_pos.get().is_none() {
+                "  click base point".to_string()
+            } else if imp.current_mode.get() == DrawingMode::Rotate {
+                {
+                let (bx, by) = imp.start_pos.get().unwrap_or((0.0, 0.0));
+                let deg = (sn_y - by).atan2(sn_x - bx).to_degrees().rem_euclid(360.0);
+                format!("  angle {:.1}° | click or type degrees + Enter | Shift: copy", deg)
+            }
+            } else {
+                {
+                let (bx, by) = imp.start_pos.get().unwrap_or((0.0, 0.0));
+                let k = (sn_x - bx).hypot(sn_y - by) * scale / 100.0;
+                format!("  scale x{:.3} | click (100 px = x1) or type factor + Enter | Shift: copy", k)
+            }
             }
         } else if imp.current_mode.get() == DrawingMode::Offset {
             let dist = imp.offset_distance.get();
@@ -2884,7 +3531,7 @@ impl DraftingWindow {
         }
         match imp.current_mode.get() {
             DrawingMode::Line => imp.start_pos.get(),
-            DrawingMode::Mirror => imp.start_pos.get(),
+            DrawingMode::Mirror | DrawingMode::Rotate => imp.start_pos.get(),
             DrawingMode::Dimension if imp.dimension_step.get() == 1 => imp.start_pos.get(),
             DrawingMode::Polyline => imp.pending_points.borrow().last().map(|p| (p.x, p.y)),
             _ => None,
@@ -3583,6 +4230,9 @@ impl DraftingWindow {
     }
 
     fn with_engine<R>(&self, f: impl FnOnce(&mut crate::engine::Engine) -> R) -> Option<R> {
+        if self.layout_mode() {
+            return None;
+        }
         let imp = self.imp();
         let page = imp.tab_view.selected_page()?;
         let pages = imp.pages.borrow();
@@ -4030,6 +4680,9 @@ impl DraftingWindow {
     }
 
     pub fn undo_action(&self) {
+        if self.layout_mode() {
+            return;
+        }
         if let Some(page) = self.imp().tab_view.selected_page() {
             {
                 let pages = self.imp().pages.borrow();
@@ -4043,6 +4696,9 @@ impl DraftingWindow {
     }
 
     pub fn redo_action(&self) {
+        if self.layout_mode() {
+            return;
+        }
         if let Some(page) = self.imp().tab_view.selected_page() {
             {
                 let pages = self.imp().pages.borrow();
@@ -4819,6 +5475,8 @@ fn trace_element(cr: &gtk::cairo::Context, cam: &crate::engine::Camera, data: &E
 
 /// วาดภาพเงา (ทุกชนิดวัตถุ) ลง path ปัจจุบัน
 fn trace_ghost(cr: &gtk::cairo::Context, cam: &crate::engine::Camera, data: &ElementData) {
+    // ไม่ให้ arc()/circle ต่อเส้นจากจุดปลายของวัตถุก่อนหน้า
+    cr.new_sub_path();
     match data {
         ElementData::Dimension { start, end, offset } => {
             if let Some(g) = linear_dimension_geometry(*start, *end, *offset) {

@@ -195,20 +195,30 @@ fn layout_of(page: &adw::TabPage) -> Option<Shared> {
 }
 
 impl DraftingWindow {
-    /// หน้าต่างแบบที่ Layout นี้ดูอยู่ (ถ้าเปิดอยู่เป็น Layout ใช้ต้นฉบับของมัน)
+    /// หน้าแบบ (ไฟล์) ที่กำลังเปิดอยู่ — Layout ของมันถูกแยกไว้ใน layout_view
     fn layout_source(&self) -> Option<adw::TabPage> {
-        let cur = self.imp().tab_view.selected_page()?;
-        let src = match layout_of(&cur) {
-            Some(t) => t.borrow().src.upgrade(),
-            None => Some(cur),
-        };
-        let src = src?;
+        let src = self.imp().tab_view.selected_page()?;
         self.imp().pages.borrow().contains_key(&src).then_some(src)
     }
 
-    /// ชื่อ Layout ของแบบนี้ที่มีแท็บเปิดอยู่แล้ว
+    /// หน้า Layout ที่แสดงอยู่ (None ถ้าอยู่โหมด Model)
+    fn cur_layout_page(&self) -> Option<adw::TabPage> {
+        let imp = self.imp();
+        let stack = imp.mode_stack.get()?;
+        if stack.visible_child_name().as_deref() != Some("layout") {
+            return None;
+        }
+        imp.layout_view.get()?.selected_page()
+    }
+
+    /// true ถ้าอยู่โหมด Layout
+    pub(super) fn layout_mode(&self) -> bool {
+        self.cur_layout_page().is_some()
+    }
+
+    /// ชื่อ Layout ของแบบนี้ที่สร้างหน้าไว้แล้ว
     fn open_layout_names(&self, src: &adw::TabPage) -> Vec<String> {
-        let tv = &self.imp().tab_view;
+        let Some(tv) = self.imp().layout_view.get() else { return Vec::new() };
         (0..tv.n_pages())
             .filter_map(|i| layout_of(&tv.nth_page(i)))
             .filter_map(|t| {
@@ -218,22 +228,313 @@ impl DraftingWindow {
             .collect()
     }
 
+    /// สร้างตัวสลับโหมด: stack (Model/Layout) + แถบ Model | Layout… | + มุมซ้ายล่าง
+    pub(super) fn setup_layout_mode(&self) {
+        let imp = self.imp();
+        let Some(overlay) = imp.tab_view.parent().and_then(|p| p.downcast::<gtk::Overlay>().ok())
+        else {
+            return;
+        };
+        let model_view: adw::TabView = imp.tab_view.get();
+        overlay.set_child(None::<&gtk::Widget>);
+        let stack = gtk::Stack::builder().hexpand(true).vexpand(true).build();
+        stack.add_named(&model_view, Some("model"));
+        let lv = adw::TabView::builder().hexpand(true).vexpand(true).build();
+        stack.add_named(&lv, Some("layout"));
+        overlay.set_child(Some(&stack));
+
+        // แถบแถวล่างสุดของหน้าต่าง (นอก overlay จึงไม่ทับ command bar / toolbar ของ Layout)
+        let strip = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .halign(gtk::Align::Start)
+            .spacing(2)
+            .margin_start(6)
+            .margin_end(6)
+            .margin_top(3)
+            .margin_bottom(3)
+            .build();
+        let bar = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .child(&strip)
+            .build();
+        bar.add_css_class("toolbar");
+        let revealer = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideUp)
+            .transition_duration(180)
+            .reveal_child(false)
+            .child(&bar)
+            .build();
+        if let Some(col) = overlay.parent().and_then(|p| p.downcast::<gtk::Box>().ok()) {
+            col.append(&revealer);
+        } else {
+            overlay.add_overlay(&revealer);
+        }
+
+        let _ = imp.layout_view.set(lv);
+        let _ = imp.mode_stack.set(stack);
+        let _ = imp.mode_strip.set(strip);
+
+        // ปิดไฟล์ → ปิด Layout ของไฟล์นั้นด้วย
+        model_view.connect_page_detached(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_, page, _| obj.close_layouts_of(page)
+        ));
+        imp.btn_layout.connect_toggled(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |b| {
+                // ซ่อนแถบตอนอยู่โหมด Layout → กลับ Model ก่อน ไม่งั้นไม่มีทางกลับ
+                if !b.is_active() && obj.layout_mode() {
+                    obj.show_model();
+                } else {
+                    obj.refresh_mode_strip();
+                }
+            }
+        ));
+        self.refresh_mode_strip();
+    }
+
+    /// ลบ Layout ตามชื่อ (เปิดขึ้นมาก่อนแล้วถามยืนยัน)
+    fn delete_layout_named(&self, src: &adw::TabPage, name: &str) {
+        self.open_layout_tab(src, name);
+        let Some(page) = self.cur_layout_page() else { return };
+        let Some(t) = layout_of(&page) else { return };
+        if t.borrow().name != name {
+            return;
+        }
+        let Ok(root) = page.child().downcast::<gtk::Overlay>() else { return };
+        self.confirm_delete_layout(&t, &root);
+    }
+
+    fn close_layouts_of(&self, src: &adw::TabPage) {
+        let Some(lv) = self.imp().layout_view.get() else { return };
+        let victims: Vec<adw::TabPage> = (0..lv.n_pages())
+            .map(|i| lv.nth_page(i))
+            .filter(|p| {
+                layout_of(p).is_some_and(|t| t.borrow().src.upgrade().as_ref() == Some(src))
+            })
+            .collect();
+        for p in victims {
+            lv.close_page(&p);
+        }
+    }
+
+    fn mode_revealer(strip: &gtk::Box) -> Option<gtk::Revealer> {
+        let mut w = strip.parent();
+        while let Some(x) = w {
+            if let Ok(r) = x.clone().downcast::<gtk::Revealer>() {
+                return Some(r);
+            }
+            w = x.parent();
+        }
+        None
+    }
+
+    /// สร้างปุ่มบนแถบโหมดใหม่ตามไฟล์/Layout ที่เปิดอยู่
+    pub(super) fn refresh_mode_strip(&self) {
+        let imp = self.imp();
+        let Some(strip) = imp.mode_strip.get() else { return };
+        while let Some(c) = strip.first_child() {
+            strip.remove(&c);
+        }
+        let rev = Self::mode_revealer(strip);
+        let Some(src) = imp.tab_view.selected_page() else {
+            if let Some(r) = rev {
+                r.set_reveal_child(false);
+            }
+            return;
+        };
+        if let Some(r) = rev {
+            r.set_reveal_child(imp.btn_layout.is_active());
+        }
+        let active = self.cur_layout_page().and_then(|p| layout_of(&p)).map(|t| t.borrow().name.clone());
+        let names: Vec<String> = imp
+            .pages
+            .borrow()
+            .get(&src)
+            .map(|d| d.borrow().layouts.iter().map(|l| l.name.clone()).collect())
+            .unwrap_or_default();
+
+        let mk = |label: &str, on: bool| {
+            let b = gtk::ToggleButton::with_label(label);
+            b.set_active(on);
+            b.add_css_class("flat");
+            b
+        };
+        let model = mk("Model", active.is_none());
+        model.connect_clicked(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                glib::idle_add_local_once(glib::clone!(
+                    #[weak]
+                    obj,
+                    move || obj.show_model()
+                ));
+            }
+        ));
+        strip.append(&model);
+
+        for n in names {
+            let b = mk(&n, active.as_deref() == Some(n.as_str()));
+            // คลิกขวา → ลบ Layout
+            let ctx = gtk::GestureClick::builder().button(3).build();
+            ctx.connect_pressed(glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                #[weak(rename_to = btn)]
+                b,
+                #[strong]
+                src,
+                #[strong]
+                n,
+                move |g, _, _, _| {
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                    let pop = gtk::Popover::new();
+                    let del = gtk::Button::with_label("Delete layout…");
+                    del.add_css_class("flat");
+                    pop.set_child(Some(&del));
+                    pop.set_parent(&btn);
+                    pop.connect_closed(|p| {
+                        let p = p.clone();
+                        glib::idle_add_local_once(move || p.unparent());
+                    });
+                    del.connect_clicked(glib::clone!(
+                        #[weak]
+                        pop,
+                        #[weak]
+                        obj,
+                        #[strong]
+                        src,
+                        #[strong]
+                        n,
+                        move |_| {
+                            pop.popdown();
+                            glib::idle_add_local_once(glib::clone!(
+                                #[weak]
+                                obj,
+                                #[strong]
+                                src,
+                                #[strong]
+                                n,
+                                move || obj.delete_layout_named(&src, &n)
+                            ));
+                        }
+                    ));
+                    pop.popup();
+                }
+            ));
+            b.add_controller(ctx);
+            b.connect_clicked(glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                #[strong]
+                src,
+                #[strong]
+                n,
+                move |_| {
+                    glib::idle_add_local_once(glib::clone!(
+                        #[weak]
+                        obj,
+                        #[strong]
+                        src,
+                        #[strong]
+                        n,
+                        move || obj.open_layout_tab(&src, &n)
+                    ));
+                }
+            ));
+            strip.append(&b);
+        }
+
+        let add = gtk::Button::from_icon_name("list-add-symbolic");
+        add.add_css_class("flat");
+        add.set_tooltip_text(Some("New layout"));
+        add.connect_clicked(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            #[strong]
+            src,
+            move |_| {
+                glib::idle_add_local_once(glib::clone!(
+                    #[weak]
+                    obj,
+                    #[strong]
+                    src,
+                    move || obj.create_layout(&src)
+                ));
+            }
+        ));
+        strip.append(&add);
+    }
+
+    /// สลับไปโหมด Model
+    pub(super) fn show_model(&self) {
+        self.mode_apply(false);
+        if let Some(page) = self.imp().tab_view.selected_page() {
+            page.child().grab_focus();
+        }
+    }
+
+    /// เปลี่ยนไฟล์/เปิดไฟล์: กลับโหมด Model และรีเฟรชแถบ
+    pub(super) fn mode_file_changed(&self) {
+        self.mode_apply(true);
+    }
+
+    fn mode_apply(&self, auto_show: bool) {
+        if let Some(stack) = self.imp().mode_stack.get() {
+            stack.set_visible_child_name("model");
+        }
+        let has_layouts = self
+            .imp()
+            .tab_view
+            .selected_page()
+            .and_then(|src| {
+                self.imp().pages.borrow().get(&src).map(|d| !d.borrow().layouts.is_empty())
+            })
+            .unwrap_or(false);
+        if auto_show && has_layouts && !self.imp().btn_layout.is_active() {
+            self.imp().btn_layout.set_active(true);
+        }
+        self.sync_layout_chrome();
+        self.refresh_mode_strip();
+    }
+
+    /// สลับไปโหมด Layout (หน้าที่เลือกใน layout_view)
+    fn enter_layout_mode(&self) {
+        if let Some(stack) = self.imp().mode_stack.get() {
+            stack.set_visible_child_name("layout");
+        }
+        if !self.imp().btn_layout.is_active() {
+            self.imp().btn_layout.set_active(true);
+        }
+        self.sync_layout_chrome();
+        self.refresh_mode_strip();
+        if let Some(t) = self.cur_layout_page().and_then(|p| layout_of(&p)) {
+            if let Some(c) = t.borrow().canvas.upgrade() {
+                c.grab_focus();
+            }
+        }
+    }
+
     /// คำสั่ง `layout`: เปิด Layout ของแบบนี้ที่ปิดแท็บไปแล้ว; ถ้าเปิดครบแล้ว (หรือยังไม่มี) สร้างแผ่นใหม่
     pub(super) fn layout_command(&self) {
+        if self.layout_mode() {
+            self.show_model();
+            return;
+        }
         let Some(src) = self.layout_source() else { return };
-        let names: Vec<String> = {
+        let first: Option<String> = {
             let pages = self.imp().pages.borrow();
             let Some(d_ref) = pages.get(&src) else { return };
-            d_ref.borrow().layouts.iter().map(|l| l.name.clone()).collect()
+            d_ref.borrow().layouts.first().map(|l| l.name.clone())
         };
-        let open = self.open_layout_names(&src);
-        let closed: Vec<&String> = names.iter().filter(|n| !open.contains(n)).collect();
-        if closed.is_empty() {
-            self.create_layout(&src);
-        } else {
-            for n in closed {
-                self.open_layout_tab(&src, n);
-            }
+        match first {
+            Some(n) => self.open_layout_tab(&src, &n),
+            None => self.create_layout(&src),
         }
     }
 
@@ -254,25 +555,14 @@ impl DraftingWindow {
     }
 
     /// เปิดแท็บของ Layout ทุกแผ่นในแบบ (ใช้หลังเปิดไฟล์) แล้วกลับมาที่แท็บแบบ
-    pub(super) fn open_layout_tabs(&self, src: &adw::TabPage) {
-        let names: Vec<String> = {
-            let pages = self.imp().pages.borrow();
-            let Some(d_ref) = pages.get(src) else { return };
-            d_ref.borrow().layouts.iter().map(|l| l.name.clone()).collect()
-        };
-        if names.is_empty() {
-            return;
-        }
-        for n in &names {
-            self.open_layout_tab(src, n);
-        }
-        self.imp().tab_view.set_selected_page(src);
+    pub(super) fn open_layout_tabs(&self, _src: &adw::TabPage) {
+        self.mode_file_changed();
     }
 
     fn open_layout_tab(&self, src: &adw::TabPage, name: &str) {
         let imp = self.imp();
         // เปิดอยู่แล้ว → แค่สลับไป
-        let tv = &imp.tab_view;
+        let Some(tv) = imp.layout_view.get() else { return };
         for i in 0..tv.n_pages() {
             let p = tv.nth_page(i);
             if let Some(t) = layout_of(&p) {
@@ -280,6 +570,7 @@ impl DraftingWindow {
                 if tb.name == name && tb.src.upgrade().as_ref() == Some(src) {
                     drop(tb);
                     tv.set_selected_page(&p);
+                    self.enter_layout_mode();
                     return;
                 }
             }
@@ -904,9 +1195,11 @@ impl DraftingWindow {
             move |_| obj.layout_print_tab(&t)
         ));
 
-        let page = imp.tab_view.add_page(&root, None);
+        let Some(tv) = imp.layout_view.get() else { return };
+        let page = tv.add_page(&root, None);
         page.set_title(&format!("{} – {}", spec.name, src.title()));
-        imp.tab_view.set_selected_page(&page);
+        tv.set_selected_page(&page);
+        self.enter_layout_mode();
         canvas.grab_focus();
     }
 
@@ -944,9 +1237,11 @@ impl DraftingWindow {
                         }
                         src.child().queue_draw();
                     }
-                    let tv = &obj.imp().tab_view;
-                    let page = tv.page(&root);
-                    tv.close_page(&page);
+                    if let Some(tv) = obj.imp().layout_view.get() {
+                        let page = tv.page(&root);
+                        tv.close_page(&page);
+                    }
+                    obj.show_model();
                 }
             ),
         );
@@ -1198,9 +1493,9 @@ impl DraftingWindow {
     /// ซ่อน dock ลอยด้านซ้าย/ขวาที่บังกระดาษตอนอยู่ในแท็บ Layout และคืนเมื่อกลับไปแท็บแบบ
     pub(super) fn sync_layout_chrome(&self) {
         let imp = self.imp();
-        let is_layout = imp.tab_view.selected_page().is_some_and(|p| layout_of(&p).is_some());
+        let is_layout = self.layout_mode();
         if is_layout {
-            let Some(overlay) = imp.tab_view.parent() else { return };
+            let Some(overlay) = imp.mode_stack.get().and_then(|s| s.parent()) else { return };
             let mut child = overlay.first_child();
             while let Some(c) = child {
                 let next = c.next_sibling();
@@ -1225,7 +1520,7 @@ impl DraftingWindow {
 
     /// ถ้าแท็บที่เปิดอยู่เป็น Layout: จัดการ Delete / Esc ให้ แล้วคืน true
     pub(super) fn layout_key(&self, key: gdk::Key) -> bool {
-        let Some(page) = self.imp().tab_view.selected_page() else { return false };
+        let Some(page) = self.cur_layout_page() else { return false };
         let Some(t) = layout_of(&page) else { return false };
         let mut tb = t.borrow_mut();
         if key == gdk::Key::Delete || key == gdk::Key::KP_Delete {
@@ -1247,9 +1542,19 @@ impl DraftingWindow {
         true
     }
 
+    /// Ctrl+F ในแท็บ Layout: จัดกระดาษให้พอดีจอ; คืน true ถ้าอยู่โหมด Layout
+    pub(super) fn layout_fit(&self) -> bool {
+        let Some(page) = self.cur_layout_page() else { return false };
+        let Some(t) = layout_of(&page) else { return false };
+        let mut tb = t.borrow_mut();
+        tb.fitted = false;
+        tb.redraw();
+        true
+    }
+
     /// Ctrl+P ในแท็บ Layout: พิมพ์ทั้งแผ่น; คืน true ถ้าจัดการแล้ว
     pub(super) fn layout_print(&self) -> bool {
-        let Some(page) = self.imp().tab_view.selected_page() else { return false };
+        let Some(page) = self.cur_layout_page() else { return false };
         let Some(t) = layout_of(&page) else { return false };
         self.layout_print_tab(&t);
         true
@@ -1362,7 +1667,7 @@ pub(super) enum ClipOp {
 impl DraftingWindow {
     /// Copy/Cut/Paste ในแท็บ Layout; คืน false ถ้าแท็บที่เปิดอยู่ไม่ใช่ Layout
     pub(super) fn layout_clip(&self, op: ClipOp) -> bool {
-        let Some(page) = self.imp().tab_view.selected_page() else { return false };
+        let Some(page) = self.cur_layout_page() else { return false };
         let Some(t) = layout_of(&page) else { return false };
         let mut tb = t.borrow_mut();
         match op {

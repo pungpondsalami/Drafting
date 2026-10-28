@@ -10,8 +10,8 @@
   </menu>
 
   <template class="DraftingWindow" parent="AdwApplicationWindow">
-    <property name="default-width">1200</property>
-    <property name="default-height">800</property>
+    <property name="default-width">1400</property>
+    <property name="default-height">900</property>
     <property name="title">Drafting</property>
 
     <property name="content">
@@ -102,9 +102,9 @@
                       </object>
                     </child>
                     <child>
-                      <object class="GtkButton" id="btn_layout">
+                      <object class="GtkToggleButton" id="btn_layout">
                         <property name="icon-name">dashed-rectanngle-symbolic</property>
-                        <property name="tooltip-text">Layout / Print (lay)</property>
+                        <property name="tooltip-text">Show / hide layout tabs</property>
                       </object>
                     </child>
                   </object>
@@ -516,6 +516,30 @@
                           <object class="GtkButton" id="btn_mirror">
                             <property name="icon-name">flip-h-symbolic</property>
                             <property name="tooltip-text">Mirror (MI, select objects first)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_rotate">
+                            <property name="icon-name">rotate-cw-symbolic</property>
+                            <property name="tooltip-text">Rotate (RO, select objects first)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_scale">
+                            <property name="icon-name">transform-scale-symbolic</property>
+                            <property name="tooltip-text">Scale (SC, select objects first)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_fillet">
+                            <property name="icon-name">corner-fillet-symbolic</property>
+                            <property name="tooltip-text">Fillet (type: f 5)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_chamfer">
+                            <property name="icon-name">corner-chamfer-symbolic</property>
+                            <property name="tooltip-text">Chamfer (type: ch 5)</property>
                           </object>
                         </child>
                         <child>
