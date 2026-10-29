@@ -149,6 +149,39 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$dst\share\icons\hicolor\512x512\apps" | Out-Null
           Copy-Item "data\icons\hicolor\512x512\apps\com.pungpondsalami.drafting.png" "$dst\share\icons\hicolor\512x512\apps\"
 
+      - name: Resolve DLL dependencies
+        run: |
+          $gtk_bin = "C:\gtk-build\gtk\x64\release\bin"
+          $dst     = (Resolve-Path "dist\drafting").Path
+          $done    = @{}
+          $queue   = New-Object System.Collections.Queue
+          $queue.Enqueue((Join-Path $dst "drafting.exe"))
+          Get-ChildItem $dst -Filter *.dll | ForEach-Object { $queue.Enqueue($_.FullName) }
+          $missing = @()
+          while ($queue.Count -gt 0) {
+            $f = $queue.Dequeue()
+            if ($done.ContainsKey($f)) { continue }
+            $done[$f] = $true
+            $out = & dumpbin /dependents $f 2>$null
+            foreach ($line in $out) {
+              if ($line -match '^\s+(\S+\.dll)\s*$') {
+                $name = $Matches[1]
+                if (Test-Path (Join-Path $dst $name)) { continue }
+                $src = Join-Path $gtk_bin $name
+                if (Test-Path $src) {
+                  Copy-Item $src $dst\
+                  Write-Host "Added: $name (needed by $(Split-Path $f -Leaf))"
+                  $queue.Enqueue((Join-Path $dst $name))
+                } elseif (-not (Test-Path (Join-Path $env:SystemRoot "System32\$name"))) {
+                  $missing += $name
+                }
+              }
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Warning ("Unresolved (not in GTK bin or System32): " + (($missing | Sort-Object -Unique) -join ", "))
+          }
+
       - name: Prepare MSIX assets
         run: |
           New-Item -ItemType Directory -Force -Path "msix\Assets" | Out-Null
