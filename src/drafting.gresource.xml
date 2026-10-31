@@ -33,5 +33,10 @@
     <file>icons/transform-scale-symbolic.svg</file>
     <file>icons/corner-fillet-symbolic.svg</file>
     <file>icons/corner-chamfer-symbolic.svg</file>
+    <file>icons/draw-rectangle-symbolic.svg</file>
+    <file>icons/draw-oval2-symbolic.svg</file>
+    <file>icons/scissors-symbolic.svg</file>
+    <file>icons/line-join-symbolic.svg</file>
+    <file>icons/stretch-symbolic.svg</file>
   </gresource>
 </gresources>

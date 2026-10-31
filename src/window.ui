@@ -179,6 +179,18 @@
                   </object>
                 </child>
                 <child>
+                  <object class="GtkButton" id="btn_rectangle">
+                    <property name="icon-name">draw-rectangle-symbolic</property>
+                    <property name="tooltip-text">Rectangle (R, or type: rec)</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="btn_ellipse">
+                    <property name="icon-name">draw-oval2-symbolic</property>
+                    <property name="tooltip-text">Ellipse (type: el)</property>
+                  </object>
+                </child>
+                <child>
                   <object class="GtkButton" id="btn_dimension">
                     <property name="icon-name">ruler-outline-horizontal-symbolic</property>
                     <property name="tooltip-text">Dimension (D)</property>
@@ -281,12 +293,44 @@
               </object>
             </child>
 
+            <!-- Toast (noti ชั่วคราวเหนือ Command Bar) -->
+            <child type="overlay">
+              <object class="GtkRevealer" id="toast_revealer">
+                <property name="halign">center</property>
+                <property name="valign">end</property>
+                <property name="margin-bottom">72</property>
+                <property name="can-target">false</property>
+                <property name="transition-type">slide-up</property>
+                <property name="transition-duration">200</property>
+                <property name="reveal-child">false</property>
+                <child>
+                  <object class="GtkBox">
+                    <style>
+                      <class name="osd"/>
+                      <class name="toolbar"/>
+                      <class name="drafting-floating"/>
+                    </style>
+                    <child>
+                      <object class="GtkLabel" id="toast_label">
+                        <property name="margin-start">14</property>
+                        <property name="margin-end">14</property>
+                        <property name="margin-top">6</property>
+                        <property name="margin-bottom">6</property>
+                        <property name="wrap">true</property>
+                        <property name="max-width-chars">60</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+
             <!-- Command Bar -->
             <child type="overlay">
               <object class="GtkBox">
                 <property name="halign">center</property>
                 <property name="valign">end</property>
-                <property name="margin-bottom">18</property>
+                <property name="margin-bottom">12</property>
                 <property name="spacing">8</property>
                 <style>
                   <class name="osd"/>
@@ -301,7 +345,7 @@
                 </child>
                 <child>
                   <object class="GtkEntry" id="cmd_entry">
-                    <property name="width-request">350</property>
+                    <property name="width-request">300</property>
                     <property name="placeholder-text">Type a command...</property>
                   </object>
                 </child>
@@ -558,6 +602,24 @@
                           <object class="GtkButton" id="btn_extend">
                             <property name="icon-name">line-extend-symbolic</property>
                             <property name="tooltip-text">Extend (Shift in Trim mode)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_break">
+                            <property name="icon-name">scissors-symbolic</property>
+                            <property name="tooltip-text">Break (type: br)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_join">
+                            <property name="icon-name">line-join-symbolic</property>
+                            <property name="tooltip-text">Join (type: j, select objects first)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="btn_stretch">
+                            <property name="icon-name">stretch-symbolic</property>
+                            <property name="tooltip-text">Stretch (type: st, window-select first)</property>
                           </object>
                         </child>
                         <child>

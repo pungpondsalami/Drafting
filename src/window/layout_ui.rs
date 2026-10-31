@@ -645,8 +645,6 @@ impl DraftingWindow {
         scale_obj_btn.set_tooltip_text(Some("Scale the selected objects on the sheet (or drag the square at their bottom-right corner)."));
         let mono_dd = dropdown(&["Colour", "Black"], 0);
         let fit_btn = gtk::Button::with_label("Fit");
-        let new_lay_btn = gtk::Button::with_label("New Layout");
-        let del_lay_btn = gtk::Button::with_label("Delete Layout");
         let print_btn = gtk::Button::with_label("Print…");
 
         // toolbar_overlay: แถบลอยสไตล์เดียวกับ dock ของแอป วางทับกระดาษ ไม่กินที่
@@ -669,8 +667,6 @@ impl DraftingWindow {
             mono_dd.clone().upcast(),
             fit_btn.clone().upcast(),
             gtk::Separator::new(gtk::Orientation::Vertical).upcast(),
-            new_lay_btn.clone().upcast(),
-            del_lay_btn.clone().upcast(),
             print_btn.clone().upcast(),
         ] {
             bar.append(&w);
@@ -1158,27 +1154,6 @@ impl DraftingWindow {
                 tb.fitted = false;
                 tb.redraw();
             }
-        ));
-        new_lay_btn.connect_clicked(glib::clone!(
-            #[weak(rename_to = obj)]
-            self,
-            #[strong]
-            t,
-            move |_| {
-                let src = t.borrow().src.upgrade();
-                if let Some(src) = src {
-                    obj.create_layout(&src);
-                }
-            }
-        ));
-        del_lay_btn.connect_clicked(glib::clone!(
-            #[weak(rename_to = obj)]
-            self,
-            #[strong]
-            t,
-            #[weak]
-            root,
-            move |_| obj.confirm_delete_layout(&t, &root)
         ));
         scale_obj_btn.connect_clicked(glib::clone!(
             #[weak(rename_to = obj)]

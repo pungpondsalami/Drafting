@@ -184,6 +184,16 @@ mod imp {
         #[template_child]
         pub btn_extend: TemplateChild<gtk::Button>,
         #[template_child]
+        pub btn_rectangle: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_ellipse: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_break: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_join: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_stretch: TemplateChild<gtk::Button>,
+        #[template_child]
         pub btn_mirror: TemplateChild<gtk::Button>,
         #[template_child]
         pub btn_rotate: TemplateChild<gtk::Button>,
@@ -274,6 +284,19 @@ mod imp {
         /// จุดจับ (snap แล้ว) ตอนเริ่มย้าย และระยะที่ย้ายไปแล้ว
         pub move_base: Cell<Option<(f64, f64)>>,
         pub move_applied: Cell<(f64, f64)>,
+        /// คำขอพิมพ์ที่รอลากกรอบ: (กระดาษ, แนวนอน?, สเกล, ขาวดำ?)
+        pub print_req: Cell<Option<(usize, bool, usize, bool)>>,
+        #[template_child]
+        pub toast_revealer: TemplateChild<gtk::Revealer>,
+        #[template_child]
+        pub toast_label: TemplateChild<gtk::Label>,
+        pub toast_seq: Cell<u32>,
+        /// Z: รอตัวเลือกซูม (E/A/W/P)
+        pub zoom_prompt: Cell<bool>,
+        /// PrintWindow ถูกใช้ลากกรอบซูม ไม่ใช่กรอบพิมพ์
+        pub zoom_window: Cell<bool>,
+        /// มุมมองก่อนซูมแต่ละครั้ง (target_scale, target_offset) สำหรับ Zoom Previous
+        pub zoom_prev: RefCell<Vec<(f64, (f64, f64))>>,
     }
 
     #[glib::object_subclass]
@@ -336,7 +359,7 @@ mod imp {
                     let typing = obj.is_typing();
 
                     // กล่องโต้ตอบเปิดอยู่ (เช่น กล่องพิมพ์ข้อความ): ปล่อยคีย์ให้กล่องจัดการเอง
-                    if obj.imp().is_dialog_open.get() {
+                    if obj.imp().is_dialog_open.get() || obj.visible_dialog().is_some() {
                         return glib::Propagation::Proceed;
                     }
 
@@ -349,6 +372,11 @@ mod imp {
                     if key == gdk::Key::Shift_L || key == gdk::Key::Shift_R {
                         obj.set_shift(true);
                         return glib::Propagation::Proceed;
+                    }
+
+                    // Z ถามตัวเลือกซูมอยู่: ตอบด้วย E / A / W / P
+                    if !typing && obj.zoom_key(key) {
+                        return glib::Propagation::Stop;
                     }
 
                     // Redo: Ctrl+Y หรือ Ctrl+Shift+Z
@@ -395,7 +423,7 @@ mod imp {
                     }
 
                     // แท็บ Layout: Delete / Esc จัดการเอง
-                    if obj.layout_key(key) {
+                    if (!typing || key == gdk::Key::Escape) && obj.layout_key(key) {
                         return glib::Propagation::Stop;
                     }
                     // โหมด Layout: ปุ่มอักษรเดี่ยว (คีย์ลัดเครื่องมือ) ต้องไม่ไปทำงานกับแบบที่ซ่อนอยู่
@@ -432,19 +460,9 @@ mod imp {
                         return glib::Propagation::Stop;
                     }
 
-                    // Zoom to cursor: Z
-                    if (key == gdk::Key::z || key == gdk::Key::Z) && !typing {
-                        if let Some(page) = obj.imp().tab_view.selected_page() {
-                            let (w, h) =
-                                (page.child().width() as f64, page.child().height() as f64);
-                            let pages = obj.imp().pages.borrow();
-                            if let Some(d_ref) = pages.get(&page) {
-                                let mut d = d_ref.borrow_mut();
-                                let (mx, my) = obj.imp().mouse_pos.get();
-                                let (wx, wy) = d.camera.screen_to_world(mx, my);
-                                d.camera.zoom_to_point(wx, wy, (w, h), 2.0);
-                            }
-                        }
+                    // Z = ZOOM (E / A / W / P) แบบ AutoCAD
+                    if (key == gdk::Key::z || key == gdk::Key::Z) && !typing && !is_ctrl {
+                        obj.begin_zoom_prompt();
                         return glib::Propagation::Stop;
                     }
 
@@ -461,6 +479,7 @@ mod imp {
                             gdk::Key::e | gdk::Key::E => Some(DrawingMode::Extend),
                             gdk::Key::h | gdk::Key::H => Some(DrawingMode::Hatch),
                             gdk::Key::x | gdk::Key::X => Some(DrawingMode::Text),
+                            gdk::Key::r | gdk::Key::R => Some(DrawingMode::Rectangle),
                             _ => None,
                         };
                         if let Some(mode) = tool {
@@ -913,6 +932,43 @@ mod imp {
                 move |_| obj.set_tool(DrawingMode::Extend)
             ));
 
+            self.btn_rectangle.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Rectangle)
+            ));
+
+            self.btn_ellipse.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Ellipse)
+            ));
+
+            self.btn_break.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Break)
+            ));
+
+            self.btn_join.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    let n = obj.with_engine(|d| d.join_selected()).unwrap_or(0);
+                    *obj.imp().offset_msg.borrow_mut() = if n == 0 {
+                        "Select lines/polylines that touch end to end, then JOIN (J)".to_string()
+                    } else {
+                        format!("Joined {} group(s)", n)
+                    };
+                }
+            ));
+
+            self.btn_stretch.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::Stretch)
+            ));
+
             self.btn_mirror.connect_clicked(glib::clone!(
                 #[weak]
                 obj,
@@ -1011,6 +1067,22 @@ mod imp {
                             let chamfer = obj.imp().current_mode.get() == DrawingMode::Chamfer;
                             obj.set_corner_value(chamfer, text.parse::<f64>().unwrap_or(0.0));
                             true
+                        } else if first == "z" || first == "zoom" {
+                            if !obj.layout_mode() {
+                                match parts.next().map(|a| a.to_lowercase()).as_deref() {
+                                    None => obj.begin_zoom_prompt(),
+                                    Some("e") | Some("extents") => obj.zoom_extents(),
+                                    Some("a") | Some("all") => obj.zoom_all(),
+                                    Some("w") | Some("window") => obj.begin_zoom_window(),
+                                    Some("p") | Some("previous") => obj.zoom_previous(),
+                                    Some(a) => {
+                                        if let Ok(k) = a.trim_end_matches('x').parse::<f64>() {
+                                            obj.zoom_factor(k);
+                                        }
+                                    }
+                                }
+                            }
+                            true
                         } else if first == "of" || first == "offset" {
                             obj.set_tool(DrawingMode::Offset);
                             if let Some(v) = parts.next().and_then(|s| s.parse::<f64>().ok()) {
@@ -1081,9 +1153,9 @@ mod imp {
                                     d_ref.borrow_mut().zoom_to_extents(w, h);
                                 }
                             }
-                            "s" | "select" => obj.imp().current_mode.set(DrawingMode::Select),
-                            "l" | "line" => obj.imp().current_mode.set(DrawingMode::Line),
-                            "c" | "circle" => obj.imp().current_mode.set(DrawingMode::Circle),
+                            "s" | "select" => obj.set_tool(DrawingMode::Select),
+                            "l" | "line" => obj.set_tool(DrawingMode::Line),
+                            "c" | "circle" => obj.set_tool(DrawingMode::Circle),
                             "ortho" | "or" => {
                                 let o = &obj.imp().ortho;
                                 o.set(!o.get());
@@ -1108,6 +1180,18 @@ mod imp {
                             "sc" | "scale" => obj.set_tool(DrawingMode::Scale),
                             "h" | "hatch" => obj.set_tool(DrawingMode::Hatch),
                             "tx" | "text" => obj.set_tool(DrawingMode::Text),
+                            "rec" | "rect" | "rectangle" => obj.set_tool(DrawingMode::Rectangle),
+                            "el" | "ellipse" => obj.set_tool(DrawingMode::Ellipse),
+                            "br" | "break" => obj.set_tool(DrawingMode::Break),
+                            "st" | "stretch" => obj.set_tool(DrawingMode::Stretch),
+                            "j" | "join" => {
+                                let n = obj.with_engine(|d| d.join_selected()).unwrap_or(0);
+                                *obj.imp().offset_msg.borrow_mut() = if n == 0 {
+                                    "Select lines/polylines that touch end to end, then JOIN (J)".to_string()
+                                } else {
+                                    format!("Joined {} group(s)", n)
+                                };
+                            }
                             "del" | "delete" | "erase" => obj.delete_action(),
                             "xp" | "explode" => {
                                 let n = obj.with_engine(|d| d.explode_selected()).unwrap_or(0);
@@ -1268,6 +1352,7 @@ impl DraftingWindow {
         imp.dim_temp_start.set(None);
         imp.dim_temp_end.set(None);
         *imp.corner_prev.borrow_mut() = None;
+        imp.zoom_prev.borrow_mut().clear();
     }
 
     /// ตั้งค่ารัศมี Fillet / ระยะ Chamfer
@@ -1358,6 +1443,27 @@ impl DraftingWindow {
                 mode = DrawingMode::Select;
             }
         }
+        if mode == DrawingMode::Stretch {
+            let ok = imp
+                .tab_view
+                .selected_page()
+                .and_then(|p| {
+                    imp.pages.borrow().get(&p).map(|d| {
+                        let d = d.borrow();
+                        d.last_sel_box.is_some() && d.history.iter().any(|e| e.is_selected)
+                    })
+                })
+                .unwrap_or(false);
+            if !ok {
+                hint = "Window-select objects first (drag right to left), then Stretch (ST)".to_string();
+                mode = DrawingMode::Select;
+            }
+        }
+        if mode != DrawingMode::PrintWindow {
+            imp.print_req.set(None);
+            imp.zoom_window.set(false);
+        }
+        imp.zoom_prompt.set(false);
         imp.current_mode.set(mode);
         imp.start_pos.set(None);
         imp.dimension_step.set(0);
@@ -1470,7 +1576,7 @@ impl DraftingWindow {
             }
         }
 
-        let buttons: [(&gtk::Button, DrawingMode); 17] = [
+        let buttons: [(&gtk::Button, DrawingMode); 21] = [
             (&imp.btn_select, DrawingMode::Select),
             (&imp.btn_line, DrawingMode::Line),
             (&imp.btn_circle, DrawingMode::Circle),
@@ -1481,6 +1587,10 @@ impl DraftingWindow {
             (&imp.btn_offset, DrawingMode::Offset),
             (&imp.btn_trim, DrawingMode::Trim),
             (&imp.btn_extend, DrawingMode::Extend),
+            (&imp.btn_rectangle, DrawingMode::Rectangle),
+            (&imp.btn_ellipse, DrawingMode::Ellipse),
+            (&imp.btn_break, DrawingMode::Break),
+            (&imp.btn_stretch, DrawingMode::Stretch),
             (&imp.btn_mirror, DrawingMode::Mirror),
             (&imp.btn_rotate, DrawingMode::Rotate),
             (&imp.btn_scale, DrawingMode::Scale),
@@ -1515,6 +1625,10 @@ impl DraftingWindow {
         imp.dim_temp_start.set(None);
         imp.dim_temp_end.set(None);
         imp.drag_start.set(None);
+        imp.is_dragging.set(false);
+        imp.print_req.set(None);
+        imp.zoom_window.set(false);
+        imp.zoom_prompt.set(false);
         imp.current_mode.set(DrawingMode::Select);
 
         // ปิด revealer ก่อน แล้วค่อย switch stack
@@ -2013,6 +2127,14 @@ impl DraftingWindow {
                         }
                     }
 
+                    if obj.imp().current_mode.get() == DrawingMode::PrintWindow {
+                        if let Some((sx, sy)) = obj.imp().drag_start.get() {
+                            if ((x - sx).powi(2) + (y - sy).powi(2)).sqrt() > 5.0 {
+                                obj.imp().is_dragging.set(true);
+                            }
+                        }
+                    }
+
                     if obj.imp().current_mode.get() == DrawingMode::Move {
                         // เช็ค button 1 (left click) กำลัง press อยู่มั้ย
                         let is_pressed = controller
@@ -2069,6 +2191,7 @@ impl DraftingWindow {
                 canvas.grab_focus();
                 let imp = obj.imp();
                 imp.is_mouse_pressed.set(true);
+                imp.zoom_prompt.set(false);
                 if imp.space_down.get() {
                     imp.space_pan.set(true); // ให้ตอนปล่อยปุ่มรู้ว่าเป็นการเลื่อน
                     return;
@@ -2478,6 +2601,114 @@ impl DraftingWindow {
                             ));
                         }
 
+                        DrawingMode::Rectangle | DrawingMode::Ellipse => {
+                            let (sx, sy, _) = d.get_input_snap(
+                                wx,
+                                wy,
+                                imp.snap_enabled.get(),
+                                &imp.snap_settings.get(),
+                            );
+                            match imp.start_pos.get() {
+                                None => imp.start_pos.set(Some((sx, sy))),
+                                Some((ax, ay)) => {
+                                    if (sx - ax).abs() > 1e-9 && (sy - ay).abs() > 1e-9 {
+                                        let (x0, x1) = (ax.min(sx), ax.max(sx));
+                                        let (y0, y1) = (ay.min(sy), ay.max(sy));
+                                        let data = if imp.current_mode.get() == DrawingMode::Rectangle {
+                                            ElementData::Polyline {
+                                                points: vec![
+                                                    Point { x: x0, y: y0 },
+                                                    Point { x: x1, y: y0 },
+                                                    Point { x: x1, y: y1 },
+                                                    Point { x: x0, y: y1 },
+                                                ],
+                                                closed: true,
+                                            }
+                                        } else {
+                                            ellipse_in_box(x0, y0, x1, y1)
+                                        };
+                                        d.checkpoint();
+                                        d.push_new(data);
+                                        imp.start_pos.set(None);
+                                    }
+                                }
+                            }
+                        }
+
+                        DrawingMode::Break => match imp.corner_first.get() {
+                            None => match d.break_pick(wx, wy) {
+                                Some(id) => {
+                                    let (sx, sy, _) = d.get_input_snap(
+                                        wx,
+                                        wy,
+                                        imp.snap_enabled.get(),
+                                        &imp.snap_settings.get(),
+                                    );
+                                    imp.corner_first.set(Some((id, (sx, sy))));
+                                    imp.offset_msg.borrow_mut().clear();
+                                }
+                                None => {
+                                    *imp.offset_msg.borrow_mut() =
+                                        "Click on a line, circle, arc or polyline".into()
+                                }
+                            },
+                            Some((id, (x1, y1))) => {
+                                let (sx, sy, _) = d.get_input_snap(
+                                    wx,
+                                    wy,
+                                    imp.snap_enabled.get(),
+                                    &imp.snap_settings.get(),
+                                );
+                                match d.break_apply(id, Point { x: x1, y: y1 }, Point { x: sx, y: sy }) {
+                                    Ok(()) => {
+                                        imp.corner_first.set(None);
+                                        imp.offset_msg.borrow_mut().clear();
+                                    }
+                                    Err(m) => *imp.offset_msg.borrow_mut() = m.into(),
+                                }
+                            }
+                        },
+
+                        DrawingMode::Stretch => {
+                            let (sx, sy, sk) = d.get_input_snap(
+                                wx,
+                                wy,
+                                imp.snap_enabled.get(),
+                                &imp.snap_settings.get(),
+                            );
+                            let (sx, sy) = if sk.is_none() { obj.ortho_apply((sx, sy)) } else { (sx, sy) };
+                            match imp.start_pos.get() {
+                                None => imp.start_pos.set(Some((sx, sy))),
+                                Some((bx, by)) => {
+                                    if d.stretch_selected(sx - bx, sy - by) == 0 {
+                                        *imp.offset_msg.borrow_mut() =
+                                            "Nothing to stretch: an object needs a point inside the window".into();
+                                    } else {
+                                        imp.offset_msg.borrow_mut().clear();
+                                    }
+                                    imp.start_pos.set(None);
+                                    imp.current_mode.set(DrawingMode::Select);
+                                }
+                            }
+                        }
+
+                        DrawingMode::PrintWindow => {
+                            // print_snap: มุมเริ่มตามจุด snap
+                            let (sx, sy, _) = d.get_input_snap(
+                                wx,
+                                wy,
+                                imp.snap_enabled.get(),
+                                &imp.snap_settings.get(),
+                            );
+                            let (px, py) = if imp.zoom_window.get() {
+                                (x, y)
+                            } else {
+                                d.camera.world_to_screen(sx, sy)
+                            };
+                            imp.drag_start.set(Some((px, py)));
+                            imp.is_dragging.set(false);
+                        }
+
                         DrawingMode::Move => {}
                     }
                 }
@@ -2504,12 +2735,88 @@ impl DraftingWindow {
                     let pages = imp.pages.borrow();
                     if let Some(d_ref) = pages.get(&page) {
                         let mut d = d_ref.borrow_mut();
-                        d.dirty = true;
+                        if imp.move_applied.get() != (0.0, 0.0) {
+                            d.dirty = true;
+                        } else {
+                            // แค่คลิก ไม่ได้ลาก: ทิ้ง checkpoint ที่เปิดไว้ตอนกด
+                            d.discard_last_checkpoint();
+                        }
                         d.finish_move();
                         imp.move_base.set(None);
                     }
                     imp.current_mode.set(DrawingMode::Select);
                     imp.drag_start.set(None);
+                    page.child().queue_draw();
+                    return;
+                }
+
+                // --- ลากกรอบซูม (Z > W) ---
+                if imp.current_mode.get() == DrawingMode::PrintWindow && imp.zoom_window.get() {
+                    let start = imp.drag_start.get();
+                    let dragging = imp.is_dragging.get();
+                    imp.drag_start.set(None);
+                    imp.is_dragging.set(false);
+                    if let (true, Some((sx, sy))) = (dragging, start) {
+                        if (x - sx).abs() >= 4.0 && (y - sy).abs() >= 4.0 {
+                            imp.zoom_window.set(false);
+                            imp.current_mode.set(DrawingMode::Select);
+                            obj.zoom_do(|d, w, h| {
+                                let a = d.camera.screen_to_world(sx, sy);
+                                let b = d.camera.screen_to_world(x, y);
+                                d.camera.focus_on_area(
+                                    Point { x: a.0.min(b.0), y: a.1.min(b.1) },
+                                    Point { x: a.0.max(b.0), y: a.1.max(b.1) },
+                                    (w, h),
+                                );
+                            });
+                        }
+                    }
+                    page.child().queue_draw();
+                    return;
+                }
+
+                // --- ลากกรอบเลือกพื้นที่พิมพ์ ---
+                if imp.current_mode.get() == DrawingMode::PrintWindow {
+                    if imp.is_dragging.get() {
+                        if let (Some((sx, sy)), Some(req)) = (imp.drag_start.get(), imp.print_req.get()) {
+                            let rect = {
+                                let pages = imp.pages.borrow();
+                                pages.get(&page).and_then(|d_ref| {
+                                    let d = d_ref.borrow();
+                                    let a = d.camera.screen_to_world(sx, sy);
+                                    let b0 = d.camera.screen_to_world(x, y);
+                                    let (bx, by, _) = d.get_input_snap_ex(
+                                        b0.0,
+                                        b0.1,
+                                        imp.snap_enabled.get(),
+                                        &imp.snap_settings.get(),
+                                        false,
+                                    );
+                                    let b = (bx, by);
+                                    let r = (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1));
+                                    // เล็กกว่า 4 px บนจอ = ลากพลาด ไม่พิมพ์
+                                    ((r.2 - r.0) * d.camera.scale >= 4.0 && (r.3 - r.1) * d.camera.scale >= 4.0)
+                                        .then_some(r)
+                                })
+                            };
+                            imp.drag_start.set(None);
+                            imp.is_dragging.set(false);
+                            imp.print_req.set(None);
+                            imp.current_mode.set(DrawingMode::Select);
+                            if rect.is_none() {
+                                *imp.offset_msg.borrow_mut() = "Print window is too small".into();
+                            }
+                            if let Some(rect) = rect {
+                                glib::idle_add_local_once(glib::clone!(
+                                    #[weak]
+                                    obj,
+                                    move || obj.run_print(req.0, req.1, false, req.2, req.3, Some(rect))
+                                ));
+                            }
+                        }
+                    } else {
+                        imp.drag_start.set(None);
+                    }
                     page.child().queue_draw();
                     return;
                 }
@@ -2822,7 +3129,26 @@ impl DraftingWindow {
                 DrawingMode::Extend => {}
                 DrawingMode::Hatch | DrawingMode::Text => {}
                 DrawingMode::Fillet | DrawingMode::Chamfer => {}
-                DrawingMode::Mirror | DrawingMode::Rotate | DrawingMode::Scale => {
+                DrawingMode::Break | DrawingMode::PrintWindow => {}
+                DrawingMode::Rectangle => {
+                    let a = cam.world_to_screen(sx, sy);
+                    let b = cam.world_to_screen(sn_x, sn_y);
+                    cr.rectangle(a.0.min(b.0), a.1.min(b.1), (a.0 - b.0).abs(), (a.1 - b.1).abs());
+                }
+                DrawingMode::Ellipse => {
+                    let a = cam.world_to_screen(sx, sy);
+                    let b = cam.world_to_screen(sn_x, sn_y);
+                    let (rx, ry) = ((a.0 - b.0).abs() / 2.0, (a.1 - b.1).abs() / 2.0);
+                    if rx > 0.5 && ry > 0.5 {
+                        cr.save().ok();
+                        cr.new_sub_path();
+                        cr.translate((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+                        cr.scale(rx, ry);
+                        cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
+                        cr.restore().ok(); // path อยู่ต่อ เส้นเขียนด้วยเมทริกซ์ปกติ ความหนาไม่เพี้ยน
+                    }
+                }
+                DrawingMode::Mirror | DrawingMode::Rotate | DrawingMode::Scale | DrawingMode::Stretch => {
                     let (psx, psy) = cam.world_to_screen(sx, sy);
                     let (pex, pey) = cam.world_to_screen(sn_x, sn_y);
                     cr.move_to(psx, psy);
@@ -3125,14 +3451,9 @@ impl DraftingWindow {
                             v,
                             ch,
                         ) {
-                            Ok(i) => {
-                                info = Some(i);
-                                let has_msg = !imp.offset_msg.borrow().is_empty();
-                                if has_msg {
-                                    imp.offset_msg.borrow_mut().clear();
-                                }
-                            }
-                            Err(m) => *imp.offset_msg.borrow_mut() = m.into(),
+                            Ok(i) => info = Some(i),
+                            // preview ทำทุกเฟรม: ห้ามตั้งข้อความ (จะกลายเป็น toast รัว) แจ้งตอนคลิกจริงแทน
+                            Err(_) => {}
                         }
                     }
                 }
@@ -3266,6 +3587,32 @@ impl DraftingWindow {
             }
         }
 
+        // --- Stretch ghost ---
+        if imp.current_mode.get() == DrawingMode::Stretch {
+            if let Some((bx, by)) = imp.start_pos.get() {
+                let ghosts = d.stretch_preview(sn_x - bx, sn_y - by, 3000);
+                cr.new_path();
+                cr.set_source_rgba(1.0, 0.5, 0.0, 0.7);
+                cr.set_line_width(1.5);
+                for g in &ghosts {
+                    trace_ghost(cr, cam, g);
+                }
+                let _ = cr.stroke();
+            }
+        }
+
+        // --- Break: จุดแรก ---
+        if imp.current_mode.get() == DrawingMode::Break {
+            if let Some((_, (x1, y1))) = imp.corner_first.get() {
+                let (px, py) = cam.world_to_screen(x1, y1);
+                cr.new_path();
+                cr.set_source_rgba(1.0, 0.5, 0.0, 0.95);
+                cr.set_line_width(2.0);
+                cr.arc(px, py, 5.0, 0.0, std::f64::consts::TAU);
+                let _ = cr.stroke();
+            }
+        }
+
         // --- Rotate / Scale ghost ---
         if matches!(imp.current_mode.get(), DrawingMode::Rotate | DrawingMode::Scale) {
             if let Some((bx, by)) = imp.start_pos.get() {
@@ -3313,9 +3660,14 @@ impl DraftingWindow {
         }
 
         // --- Selection Box ---
-        if imp.is_dragging.get() && imp.current_mode.get() == DrawingMode::Select {
+        if imp.is_dragging.get()
+            && matches!(imp.current_mode.get(), DrawingMode::Select | DrawingMode::PrintWindow)
+        {
             if let Some((sx, sy)) = imp.drag_start.get() {
-                let (mx, my) = imp.mouse_pos.get();
+                let (mut mx, mut my) = imp.mouse_pos.get();
+                if imp.current_mode.get() == DrawingMode::PrintWindow && !imp.zoom_window.get() {
+                    (mx, my) = cam.world_to_screen(sn_x, sn_y);
+                }
                 let is_crossing = mx < sx; // ขวา→ซ้าย
 
                 if is_crossing {
@@ -3357,7 +3709,11 @@ impl DraftingWindow {
 
             if matches!(
                 imp.current_mode.get(),
-                DrawingMode::Select | DrawingMode::Move | DrawingMode::Trim | DrawingMode::Extend
+                DrawingMode::Select
+                    | DrawingMode::Move
+                    | DrawingMode::Trim
+                    | DrawingMode::Extend
+                    | DrawingMode::Break
             ) {
                 const PICK: f64 = 5.0; // ครึ่งหนึ่งของด้าน (px)
                 cr.rectangle(cx - PICK, cy - PICK, 2.0 * PICK, 2.0 * PICK);
@@ -3421,14 +3777,61 @@ impl DraftingWindow {
             DrawingMode::Chamfer => "CHAMFER",
             DrawingMode::Hatch => "HATCH",
             DrawingMode::Text => "TEXT",
+            DrawingMode::Rectangle => "RECTANGLE",
+            DrawingMode::Ellipse => "ELLIPSE",
+            DrawingMode::Break => "BREAK",
+            DrawingMode::Stretch => "STRETCH",
+            DrawingMode::PrintWindow => {
+                if imp.zoom_window.get() { "ZOOM WINDOW" } else { "PRINT WINDOW" }
+            }
         };
 
-        let offset_hint = if imp.current_mode.get() == DrawingMode::Hatch {
+        // ข้อความที่ตั้งไว้ใน offset_msg ถูกยกไปแสดงเป็น toast แทน (ครั้งเดียว)
+        let pending_toast = std::mem::take(&mut *imp.offset_msg.borrow_mut());
+        if !pending_toast.is_empty() {
+            glib::idle_add_local_once(glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move || obj.toast(&pending_toast)
+            ));
+        }
+
+        let offset_hint = if imp.zoom_prompt.get() {
+            "  ZOOM: E extents | A all | W window | P previous | Esc cancel  (type: z 2x)".to_string()
+        } else if imp.current_mode.get() == DrawingMode::Hatch {
             let msg = imp.offset_msg.borrow();
             if msg.is_empty() {
                 "  click inside a closed area".to_string()
             } else {
                 format!("  click inside a closed area | {}", msg)
+            }
+        } else if matches!(imp.current_mode.get(), DrawingMode::Rectangle | DrawingMode::Ellipse) {
+            if imp.start_pos.get().is_none() {
+                "  click first corner".to_string()
+            } else {
+                "  click opposite corner".to_string()
+            }
+        } else if imp.current_mode.get() == DrawingMode::Break {
+            let step = if imp.corner_first.get().is_none() {
+                "click the object at the first break point"
+            } else {
+                "click the second break point"
+            };
+            let msg = imp.offset_msg.borrow();
+            if msg.is_empty() { format!("  {}", step) } else { format!("  {} | {}", step, msg) }
+        } else if imp.current_mode.get() == DrawingMode::Stretch {
+            let step = if imp.start_pos.get().is_none() {
+                "click base point"
+            } else {
+                "click new point"
+            };
+            let msg = imp.offset_msg.borrow();
+            if msg.is_empty() { format!("  {}", step) } else { format!("  {} | {}", step, msg) }
+        } else if imp.current_mode.get() == DrawingMode::PrintWindow {
+            if imp.zoom_window.get() {
+                "  drag a window to zoom into | Esc: cancel".to_string()
+            } else {
+                "  drag a window around the area to print | Esc: cancel".to_string()
             }
         } else if imp.current_mode.get() == DrawingMode::Text {
             "  click where the text goes".to_string()
@@ -3531,7 +3934,7 @@ impl DraftingWindow {
         }
         match imp.current_mode.get() {
             DrawingMode::Line => imp.start_pos.get(),
-            DrawingMode::Mirror | DrawingMode::Rotate => imp.start_pos.get(),
+            DrawingMode::Mirror | DrawingMode::Rotate | DrawingMode::Stretch => imp.start_pos.get(),
             DrawingMode::Dimension if imp.dimension_step.get() == 1 => imp.start_pos.get(),
             DrawingMode::Polyline => imp.pending_points.borrow().last().map(|p| (p.x, p.y)),
             _ => None,
@@ -4018,7 +4421,7 @@ impl DraftingWindow {
         let scales: Vec<&str> = PRINT_SCALES.iter().map(|p| p.0).collect();
         let paper = mk(&papers, o.0);
         let orient = mk(&["Landscape", "Portrait"], o.1);
-        let area = mk(&["Current view", "Everything"], o.2);
+        let area = mk(&["Current view", "Everything", "Window"], o.2);
         let scale = mk(&scales, o.3);
         let color = mk(&["Black", "Colour"], o.4);
 
@@ -4075,13 +4478,25 @@ impl DraftingWindow {
                     glib::idle_add_local_once(glib::clone!(
                         #[weak]
                         obj,
-                        move || obj.run_print(
-                            sel.0 as usize,
-                            sel.1 == 0,
-                            sel.2 == 1,
-                            sel.3 as usize,
-                            sel.4 == 0
-                        )
+                        move || {
+                            if sel.2 == 2 {
+                                obj.begin_print_window(
+                                    sel.0 as usize,
+                                    sel.1 == 0,
+                                    sel.3 as usize,
+                                    sel.4 == 0,
+                                );
+                            } else {
+                                obj.run_print(
+                                    sel.0 as usize,
+                                    sel.1 == 0,
+                                    sel.2 == 1,
+                                    sel.3 as usize,
+                                    sel.4 == 0,
+                                    None,
+                                );
+                            }
+                        }
                     ));
                 }
             ),
@@ -4089,7 +4504,170 @@ impl DraftingWindow {
         dialog.present(Some(self));
     }
 
-    fn run_print(&self, paper: usize, landscape: bool, whole: bool, scale: usize, mono: bool) {
+    /// พิมพ์แบบลากกรอบ: จำค่าที่เลือกไว้ แล้วรอให้ผู้ใช้ลากกรอบบนจอ (Esc ยกเลิก)
+    /// Z: ถามตัวเลือกซูมแบบ AutoCAD (E/A = ทั้งหมด, W = กรอบ, P = ก่อนหน้า)
+    /// noti ชั่วคราวด้านล่างเหนือ command bar (หายเองใน 2.8 วินาที)
+    pub fn toast(&self, msg: &str) {
+        let imp = self.imp();
+        imp.toast_label.set_label(msg);
+        imp.toast_revealer.set_reveal_child(true);
+        let id = imp.toast_seq.get().wrapping_add(1);
+        imp.toast_seq.set(id);
+        glib::timeout_add_local_once(
+            std::time::Duration::from_millis(2800),
+            glib::clone!(
+                #[weak(rename_to = obj)]
+                self,
+                move || {
+                    if obj.imp().toast_seq.get() == id {
+                        obj.imp().toast_revealer.set_reveal_child(false);
+                    }
+                }
+            ),
+        );
+    }
+
+    fn begin_zoom_prompt(&self) {
+        let imp = self.imp();
+        imp.zoom_prompt.set(true);
+        if let Some(page) = imp.tab_view.selected_page() {
+            page.child().queue_draw();
+        }
+    }
+
+    /// คืน true ถ้าคีย์นี้เป็นคำตอบของ Z (เรียกเฉพาะตอนไม่ได้พิมพ์ใน command bar)
+    fn zoom_key(&self, key: gdk::Key) -> bool {
+        let imp = self.imp();
+        if !imp.zoom_prompt.get() {
+            return false;
+        }
+        if matches!(
+            key,
+            gdk::Key::Shift_L
+                | gdk::Key::Shift_R
+                | gdk::Key::Control_L
+                | gdk::Key::Control_R
+                | gdk::Key::Alt_L
+                | gdk::Key::Alt_R
+        ) {
+            return false;
+        }
+        imp.zoom_prompt.set(false);
+        let handled = match key {
+            gdk::Key::e | gdk::Key::E => {
+                self.zoom_extents();
+                true
+            }
+            gdk::Key::a | gdk::Key::A => {
+                self.zoom_all();
+                true
+            }
+            gdk::Key::w | gdk::Key::W | gdk::Key::Return | gdk::Key::KP_Enter => {
+                self.begin_zoom_window();
+                true
+            }
+            gdk::Key::p | gdk::Key::P => {
+                self.zoom_previous();
+                true
+            }
+            gdk::Key::Escape => true,
+            _ => false,
+        };
+        if let Some(page) = imp.tab_view.selected_page() {
+            page.child().queue_draw();
+        }
+        handled
+    }
+
+    /// จำมุมมองปัจจุบันไว้ให้ Zoom Previous แล้วค่อยทำ f
+    fn zoom_do(&self, f: impl FnOnce(&mut crate::engine::Engine, f64, f64)) {
+        let imp = self.imp();
+        let Some(page) = imp.tab_view.selected_page() else { return };
+        let (w, h) = (page.child().width() as f64, page.child().height() as f64);
+        let pages = imp.pages.borrow();
+        if let Some(d_ref) = pages.get(&page) {
+            let mut d = d_ref.borrow_mut();
+            let prev = (d.camera.target_scale, d.camera.target_offset);
+            {
+                let mut st = imp.zoom_prev.borrow_mut();
+                st.push(prev);
+                if st.len() > 30 {
+                    st.remove(0);
+                }
+            }
+            f(&mut *d, w, h);
+        }
+        page.child().queue_draw();
+    }
+
+    fn zoom_extents(&self) {
+        self.zoom_do(|d, w, h| d.zoom_to_extents(w, h));
+    }
+
+    fn zoom_all(&self) {
+        self.zoom_do(|d, w, h| d.zoom_to_fit(w, h));
+    }
+
+    /// ซูมเข้า/ออกด้วยตัวคูณ k รอบกึ่งกลางจอ
+    fn zoom_factor(&self, k: f64) {
+        if !(k.is_finite() && k > 0.0) {
+            return;
+        }
+        self.zoom_do(|d, w, h| {
+            let (wx, wy) = d.camera.screen_to_world(w / 2.0, h / 2.0);
+            d.camera.zoom_to_point(wx, wy, (w, h), k);
+        });
+    }
+
+    fn zoom_previous(&self) {
+        let imp = self.imp();
+        let prev = imp.zoom_prev.borrow_mut().pop();
+        let Some(page) = imp.tab_view.selected_page() else { return };
+        match prev {
+            Some((sc, off)) => {
+                let pages = imp.pages.borrow();
+                if let Some(d_ref) = pages.get(&page) {
+                    let mut d = d_ref.borrow_mut();
+                    d.camera.target_scale = sc;
+                    d.camera.target_offset = off;
+                }
+            }
+            None => {
+                *imp.offset_msg.borrow_mut() = "No previous view".into();
+                glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(2500),
+                    glib::clone!(
+                        #[weak(rename_to = obj)]
+                        self,
+                        move || obj.imp().offset_msg.borrow_mut().clear()
+                    ),
+                );
+            }
+        }
+        page.child().queue_draw();
+    }
+
+    /// ลากกรอบแล้วซูมเข้าตามกรอบ (ใช้กลไกลากกรอบเดียวกับ Print Window)
+    fn begin_zoom_window(&self) {
+        self.set_tool(DrawingMode::PrintWindow);
+        self.imp().zoom_window.set(true);
+    }
+
+    fn begin_print_window(&self, paper: usize, landscape: bool, scale: usize, mono: bool) {
+        self.imp().print_req.set(Some((paper, landscape, scale, mono)));
+        self.set_tool(DrawingMode::PrintWindow);
+    }
+
+    /// window = Some(กรอบในพิกัดแบบ) พิมพ์เฉพาะในกรอบนั้น
+    fn run_print(
+        &self,
+        paper: usize,
+        landscape: bool,
+        whole: bool,
+        scale: usize,
+        mono: bool,
+        window: Option<(f64, f64, f64, f64)>,
+    ) {
         let imp = self.imp();
         let Some(page) = imp.tab_view.selected_page() else { return };
         let (Some(&(_, pw0, ph0)), Some(&(_, n))) = (PAPERS.get(paper), PRINT_SCALES.get(scale)) else {
@@ -4105,7 +4683,9 @@ impl DraftingWindow {
 
         let cmds = self
             .with_engine(|d| {
-                let (x0, y0, x1, y1) = if whole {
+                let (x0, y0, x1, y1) = if let Some(w) = window {
+                    w
+                } else if whole {
                     let (a, b) = d.get_elements_bounds()?;
                     (a.x, a.y, b.x, b.y)
                 } else {
@@ -4125,10 +4705,13 @@ impl DraftingWindow {
                 let cmds = d.get_render_commands_in(0.0, 0.0, bw, bh);
                 d.camera.scale = saved.0;
                 d.camera.offset = saved.1;
-                Some(cmds)
+                // พิมพ์ตามกรอบ: ตัดส่วนนอกกรอบทิ้ง (พิกัดในพื้นที่พิมพ์ หน่วย px)
+                let clip =
+                    window.map(|_| ((bw - dx * s) / 2.0, (bh - dy * s) / 2.0, dx * s, dy * s));
+                Some((cmds, clip))
             })
             .flatten();
-        let Some(cmds) = cmds else {
+        let Some((cmds, clip)) = cmds else {
             self.show_error("Nothing to print", "There are no objects to print.");
             return;
         };
@@ -4164,6 +4747,10 @@ impl DraftingWindow {
             cr.translate(((aw - bw) / 2.0).max(0.0), ((ah - bh) / 2.0).max(0.0));
             cr.rectangle(0.0, 0.0, bw, bh);
             cr.clip();
+            if let Some((cx0, cy0, cw, ch)) = clip {
+                cr.rectangle(cx0, cy0, cw, ch);
+                cr.clip();
+            }
             CairoRenderer::new(&cr).draw_commands(cmds.clone());
         });
         if let Err(e) = op.run(gtk::PrintOperationAction::PrintDialog, Some(self)) {
@@ -5068,6 +5655,23 @@ impl DraftingWindow {
         );
         dialog.present(Some(self));
     }
+}
+
+/// วงรีในกรอบสี่เหลี่ยม (กรอบจัตุรัส = วงกลม); วงรีเก็บเป็น polyline ปิด 128 จุด
+fn ellipse_in_box(x0: f64, y0: f64, x1: f64, y1: f64) -> ElementData {
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let (rx, ry) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
+    if (rx - ry).abs() <= 1e-9 * rx.max(ry) {
+        return ElementData::Circle { center: Point { x: cx, y: cy }, radius: rx };
+    }
+    const N: usize = 128;
+    let points = (0..N)
+        .map(|i| {
+            let t = std::f64::consts::TAU * i as f64 / N as f64;
+            Point { x: cx + rx * t.cos(), y: cy + ry * t.sin() }
+        })
+        .collect();
+    ElementData::Polyline { points, closed: true }
 }
 
 /// ปัดเป็นเลขกลม 1 / 2 / 5 × 10^n ที่ใกล้ที่สุด

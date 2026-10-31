@@ -75,6 +75,12 @@ pub enum ToolMode {
     Chamfer,
     Hatch,
     Text,
+    Rectangle,
+    Ellipse,
+    Break,
+    Stretch,
+    /// ลากกรอบเลือกพื้นที่พิมพ์ (กล่องพิมพ์ > Area > Window)
+    PrintWindow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -317,6 +323,59 @@ impl ElementData {
                 .copied()
                 .unwrap_or(Point { x: 0.0, y: 0.0 }),
         }
+    }
+}
+
+impl ElementData {
+    /// Stretch: จุดที่อยู่ในกรอบ r = (min_x, min_y, max_x, max_y) ขยับตาม (dx, dy) จุดอื่นอยู่ที่เดิม
+    /// วงกลม/ส่วนโค้ง/ข้อความ ขยับทั้งชิ้นเมื่อจุดอ้างอิง (ศูนย์กลาง/จุดวาง) อยู่ในกรอบ
+    /// None = ไม่มีอะไรขยับ
+    pub fn stretched(&self, r: (f64, f64, f64, f64), dx: f64, dy: f64) -> Option<ElementData> {
+        let inside = |p: &Point| p.x >= r.0 && p.x <= r.2 && p.y >= r.1 && p.y <= r.3;
+        let mv = |p: &Point| if inside(p) { Point { x: p.x + dx, y: p.y + dy } } else { *p };
+        let mut out = self.clone();
+        let mut moved = false;
+        match &mut out {
+            ElementData::Line { start, end } | ElementData::Dimension { start, end, .. } => {
+                moved = inside(start) || inside(end);
+                let (s, e) = (mv(start), mv(end));
+                *start = s;
+                *end = e;
+            }
+            ElementData::Circle { center, .. } | ElementData::Arc { center, .. } => {
+                if inside(center) {
+                    moved = true;
+                    center.x += dx;
+                    center.y += dy;
+                }
+            }
+            ElementData::Polyline { points, .. } => {
+                for p in points.iter_mut() {
+                    if inside(p) {
+                        moved = true;
+                        p.x += dx;
+                        p.y += dy;
+                    }
+                }
+            }
+            ElementData::Text { pos, .. } => {
+                if inside(pos) {
+                    moved = true;
+                    pos.x += dx;
+                    pos.y += dy;
+                }
+            }
+            ElementData::Fill { loops, .. } | ElementData::Hatch { loops, .. } => {
+                for p in loops.iter_mut().flatten() {
+                    if inside(p) {
+                        moved = true;
+                        p.x += dx;
+                        p.y += dy;
+                    }
+                }
+            }
+        }
+        moved.then_some(out)
     }
 }
 
@@ -807,7 +866,7 @@ impl Camera {
         let center_y = screen_size.1 / 2.0;
         self.target_offset = (
             center_x - (world_x * self.target_scale),
-            center_y - (world_y * self.target_scale),
+            center_y + (world_y * self.target_scale),
         );
     }
 }
@@ -828,6 +887,12 @@ pub struct Engine {
     pub redo_stack: Vec<Snapshot>,
     pub file_path: Option<PathBuf>,
     pub dirty: bool,
+    dirty_before_cp: bool,
+    /// สถานะก่อน checkpoint ล่าสุด (คืนให้เมื่อทิ้ง checkpoint ที่ไม่ได้แก้อะไร)
+    redo_before_cp: Vec<Snapshot>,
+    box_before_cp: Option<(f64, f64, f64, f64)>,
+    /// กรอบ crossing ล่าสุดที่ใช้เลือก (min_x, min_y, max_x, max_y) — Stretch ใช้
+    pub last_sel_box: Option<(f64, f64, f64, f64)>,
     pub layers: Vec<Layer>,
     pub current_layer: usize,
     pub skipped: usize,
@@ -862,6 +927,10 @@ impl Engine {
             redo_stack: Vec::new(),
             file_path: None,
             dirty: false,
+            dirty_before_cp: false,
+            redo_before_cp: Vec::new(),
+            box_before_cp: None,
+            last_sel_box: None,
             layers: vec![Layer::new("0", (255, 255, 255))],
             current_layer: 0,
             skipped: 0,
@@ -916,6 +985,7 @@ impl Engine {
     pub fn select_at(&mut self, world_x: f64, world_y: f64, add_to_selection: bool) {
         self.finish_move();
         self.sel_rev += 1;
+        self.last_sel_box = None;
         let top = self.pick_at(world_x, world_y);
 
         if !add_to_selection {
@@ -1232,6 +1302,203 @@ impl Engine {
         ids.len()
     }
 
+    /// วัตถุที่ Break ได้ใต้จุดนี้ (Line / Circle / Arc / Polyline)
+    pub fn break_pick(&self, wx: f64, wy: f64) -> Option<u64> {
+        let id = self.pick_at(wx, wy)?;
+        let i = self.index_of(id)?;
+        matches!(
+            self.history[i].data,
+            ElementData::Line { .. }
+                | ElementData::Circle { .. }
+                | ElementData::Arc { .. }
+                | ElementData::Polyline { .. }
+        )
+        .then_some(id)
+    }
+
+    /// Break: ตัดส่วนระหว่างจุด p1 → p2 ออกจากวัตถุ (Circle/Polyline ปิด ตัดตามทิศ p1 ไป p2)
+    pub fn break_apply(&mut self, id: u64, p1: Point, p2: Point) -> Result<(), &'static str> {
+        let i = self.index_of(id).ok_or("Object no longer exists")?;
+        let pieces = break_data(&self.history[i].data, p1, p2)?;
+        let (layer, color, style) =
+            (self.history[i].layer, self.history[i].color, self.history[i].style.clone());
+        self.checkpoint();
+        self.history.remove(i);
+        for data in pieces {
+            let nid = self.get_next_id();
+            self.history.push(DrawingElement {
+                id: nid,
+                is_selected: false,
+                layer,
+                color,
+                style: style.clone(),
+                data,
+            });
+        }
+        self.hovered_id = None;
+        self.rebuild_index();
+        Ok(())
+    }
+
+    /// Join: เชื่อม Line / Polyline เปิด ที่เลือกไว้และปลายชนกัน เป็นเส้นเดียว (วนกลับมาชนตัวเอง = ปิด)
+    /// คืนจำนวนกลุ่มที่เชื่อมได้
+    pub fn join_selected(&mut self) -> usize {
+        let diag = self
+            .get_elements_bounds()
+            .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
+            .unwrap_or(0.0);
+        let eps = 1e-6 * (1.0 + diag);
+        let near = |a: Point, b: Point| (a.x - b.x).hypot(a.y - b.y) <= eps;
+
+        // (จุด, id ของวัตถุต้นทาง, ตำแหน่งใน history ของชิ้นแรก)
+        let mut chains: Vec<(Vec<Point>, Vec<u64>, usize)> = Vec::new();
+        for (i, e) in self.history.iter().enumerate().filter(|(_, e)| e.is_selected) {
+            match &e.data {
+                ElementData::Line { start, end } => chains.push((vec![*start, *end], vec![e.id], i)),
+                ElementData::Polyline { points, closed: false } if points.len() >= 2 => {
+                    chains.push((points.clone(), vec![e.id], i))
+                }
+                _ => {}
+            }
+        }
+
+        let mut merged = true;
+        while merged {
+            merged = false;
+            'scan: for i in 0..chains.len() {
+                for j in (i + 1)..chains.len() {
+                    let (a_first, a_last) = (chains[i].0[0], chains[i].0[chains[i].0.len() - 1]);
+                    let (b_first, b_last) = (chains[j].0[0], chains[j].0[chains[j].0.len() - 1]);
+                    let case = if near(a_last, b_first) {
+                        1
+                    } else if near(a_last, b_last) {
+                        2
+                    } else if near(a_first, b_last) {
+                        3
+                    } else if near(a_first, b_first) {
+                        4
+                    } else {
+                        0
+                    };
+                    if case == 0 {
+                        continue;
+                    }
+                    let (mut bp, bids, bi) = chains.remove(j);
+                    let a = &mut chains[i];
+                    match case {
+                        1 => a.0.extend(bp.into_iter().skip(1)),
+                        2 => {
+                            bp.reverse();
+                            a.0.extend(bp.into_iter().skip(1));
+                        }
+                        3 => {
+                            bp.extend(a.0.drain(..).skip(1));
+                            a.0 = bp;
+                        }
+                        _ => {
+                            bp.reverse();
+                            bp.extend(a.0.drain(..).skip(1));
+                            a.0 = bp;
+                        }
+                    }
+                    a.1.extend(bids);
+                    a.2 = a.2.min(bi);
+                    merged = true;
+                    break 'scan;
+                }
+            }
+        }
+
+        // (layer, color, style, data, ids ที่ถูกแทน)
+        let mut results: Vec<(usize, Option<Rgb>, crate::linestyle::ElementStyle, ElementData, Vec<u64>)> =
+            Vec::new();
+        for (mut pts, ids, first) in chains.into_iter().filter(|c| c.1.len() >= 2) {
+            let closed = pts.len() >= 4 && near(pts[0], pts[pts.len() - 1]);
+            if closed {
+                pts.pop();
+            }
+            // ทิ้งจุดกลางที่อยู่ในแนวเดียวกัน (เส้นตรงสองท่อนต่อกัน → เส้นตรงเส้นเดียว)
+            let mut k = 1;
+            while k + 1 < pts.len() {
+                let (a, b, c) = (pts[k - 1], pts[k], pts[k + 1]);
+                let (v1, v2) = ((b.x - a.x, b.y - a.y), (c.x - b.x, c.y - b.y));
+                let (l1, l2) = (v1.0.hypot(v1.1), v2.0.hypot(v2.1));
+                let cross = v1.0 * v2.1 - v1.1 * v2.0;
+                let dot = v1.0 * v2.0 + v1.1 * v2.1;
+                if l1 > 0.0 && l2 > 0.0 && cross.abs() <= 1e-9 * l1 * l2 && dot > 0.0 {
+                    pts.remove(k);
+                } else {
+                    k += 1;
+                }
+            }
+            let data = if !closed && pts.len() == 2 {
+                ElementData::Line { start: pts[0], end: pts[1] }
+            } else {
+                ElementData::Polyline { points: pts, closed }
+            };
+            let e = &self.history[first];
+            results.push((e.layer, e.color, e.style.clone(), data, ids));
+        }
+        if results.is_empty() {
+            return 0;
+        }
+
+        self.checkpoint();
+        let gone: std::collections::HashSet<u64> =
+            results.iter().flat_map(|r| r.4.iter().copied()).collect();
+        self.history.retain(|e| !gone.contains(&e.id));
+        let n = results.len();
+        for (layer, color, style, data, _) in results {
+            let id = self.get_next_id();
+            self.history.push(DrawingElement { id, is_selected: true, layer, color, style, data });
+        }
+        self.hovered_id = None;
+        self.rebuild_index();
+        n
+    }
+
+    /// Stretch: วัตถุที่เลือกไว้ จุดที่อยู่ในกรอบ crossing ล่าสุดขยับไป (dx, dy) จุดอื่นอยู่ที่เดิม
+    /// คืนจำนวนวัตถุที่เปลี่ยน
+    pub fn stretch_selected(&mut self, dx: f64, dy: f64) -> usize {
+        let Some(r) = self.last_sel_box else { return 0 };
+        if dx.abs() < 1e-12 && dy.abs() < 1e-12 {
+            return 0;
+        }
+        let changes: Vec<(usize, ElementData)> = self
+            .history
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.is_selected)
+            .filter_map(|(i, e)| e.data.stretched(r, dx, dy).map(|d| (i, d)))
+            .collect();
+        if changes.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        let n = changes.len();
+        for (i, d) in changes {
+            self.history[i].data = d;
+        }
+        self.last_sel_box = None;
+        self.rebuild_index();
+        n
+    }
+
+    /// ภาพเงาของ Stretch (ว่างถ้ามีเกิน limit ชิ้นเพื่อไม่ให้หน่วง)
+    pub fn stretch_preview(&self, dx: f64, dy: f64, limit: usize) -> Vec<ElementData> {
+        let Some(r) = self.last_sel_box else { return Vec::new() };
+        let mut out = Vec::new();
+        for e in self.history.iter().filter(|e| e.is_selected) {
+            if let Some(d) = e.data.stretched(r, dx, dy) {
+                out.push(d);
+                if out.len() > limit {
+                    return Vec::new();
+                }
+            }
+        }
+        out
+    }
+
     pub fn delete_selected(&mut self) -> usize {
         let n = self.history.iter().filter(|e| e.is_selected).count();
         if n == 0 {
@@ -1254,6 +1521,7 @@ impl Engine {
         add_to_selection: bool,
     ) {
         self.sel_rev += 1;
+        self.last_sel_box = crossing.then(|| (x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2)));
         let sel_box = BoundingBox::from_points(x1, y1, x2, y2);
 
         if !add_to_selection {
@@ -1289,6 +1557,7 @@ impl Engine {
 
     pub fn deselect_all(&mut self) {
         self.sel_rev += 1;
+        self.last_sel_box = None;
         for el in &mut self.history {
             el.is_selected = false;
         }
@@ -1325,12 +1594,16 @@ impl Engine {
         self.layers = s.layers;
         self.current_layer = s.current_layer;
         self.sel_rev += 1;
+        self.last_sel_box = None;
         self.hovered_id = None;
         self.rebuild_index();
     }
 
     pub fn checkpoint(&mut self) {
         self.finish_move();
+        self.dirty_before_cp = self.dirty;
+        // แบบกำลังจะเปลี่ยน กรอบ crossing เดิมใช้ไม่ได้แล้ว (Stretch ต้องเลือกใหม่)
+        self.box_before_cp = self.last_sel_box.take();
         self.dirty = true;
         self.sel_rev += 1;
         let snap = self.snapshot();
@@ -1343,7 +1616,7 @@ impl Engine {
             total -= self.undo_stack[0].history.len();
             self.undo_stack.remove(0);
         }
-        self.redo_stack.clear();
+        self.redo_before_cp = std::mem::take(&mut self.redo_stack);
     }
 
     pub fn undo_last_action(&mut self) {
@@ -2088,7 +2361,11 @@ impl Engine {
 
     /// ทิ้ง checkpoint ล่าสุด (ใช้เมื่อขึ้นต้นการย้ายไปแล้วแต่ไม่ได้ขยับ)
     pub fn discard_last_checkpoint(&mut self) {
-        self.undo_stack.pop();
+        if self.undo_stack.pop().is_some() {
+            self.dirty = self.dirty_before_cp;
+            self.redo_stack = std::mem::take(&mut self.redo_before_cp);
+            self.last_sel_box = self.box_before_cp.take();
+        }
     }
 
     pub fn push_imported(
@@ -3948,6 +4225,134 @@ fn extend_polyline(
         ElementData::Polyline { points: new_pts, closed: false },
         ElementData::Line { start: origin, end: np },
     ))
+}
+
+/// ชิ้นที่เหลือหลังตัดช่วง p1 → p2 ออก (Break)
+fn break_data(data: &ElementData, p1: Point, p2: Point) -> Result<Vec<ElementData>, &'static str> {
+    const SAME: &str = "Pick two different points";
+    match data {
+        ElementData::Line { start, end } => {
+            let (dx, dy) = (end.x - start.x, end.y - start.y);
+            let len2 = dx * dx + dy * dy;
+            if len2 < 1e-18 {
+                return Err("Line has zero length");
+            }
+            let t = |p: Point| (((p.x - start.x) * dx + (p.y - start.y) * dy) / len2).clamp(0.0, 1.0);
+            let (mut a, mut b) = (t(p1), t(p2));
+            if a > b {
+                std::mem::swap(&mut a, &mut b);
+            }
+            if b - a < TRIM_EPS {
+                return Err(SAME);
+            }
+            let at = |t: f64| Point { x: start.x + dx * t, y: start.y + dy * t };
+            let mut out = Vec::new();
+            if a > TRIM_EPS {
+                out.push(ElementData::Line { start: *start, end: at(a) });
+            }
+            if b < 1.0 - TRIM_EPS {
+                out.push(ElementData::Line { start: at(b), end: *end });
+            }
+            Ok(out)
+        }
+        ElementData::Circle { center, radius } => {
+            let ang = |p: Point| (p.y - center.y).atan2(p.x - center.x).rem_euclid(TAU);
+            let (a1, a2) = (ang(p1), ang(p2));
+            if (a1 - a2).abs() < TRIM_EPS {
+                return Err(SAME);
+            }
+            // ตัดทวนเข็มจาก a1 ไป a2 → เหลือส่วนโค้งจาก a2 ไป a1
+            let mut end = a1;
+            while end <= a2 {
+                end += TAU;
+            }
+            Ok(vec![ElementData::Arc { center: *center, radius: *radius, start_angle: a2, end_angle: end }])
+        }
+        ElementData::Arc { center, radius, start_angle, end_angle } => {
+            let span = end_angle - start_angle;
+            let u_of = |p: Point| {
+                let u = ((p.y - center.y).atan2(p.x - center.x) - start_angle).rem_euclid(TAU);
+                if u > span {
+                    if u - span > TAU - u { 0.0 } else { span }
+                } else {
+                    u
+                }
+            };
+            let (mut a, mut b) = (u_of(p1), u_of(p2));
+            if a > b {
+                std::mem::swap(&mut a, &mut b);
+            }
+            if b - a < TRIM_EPS {
+                return Err(SAME);
+            }
+            let mut out = Vec::new();
+            if a > TRIM_EPS {
+                out.push(ElementData::Arc {
+                    center: *center,
+                    radius: *radius,
+                    start_angle: *start_angle,
+                    end_angle: start_angle + a,
+                });
+            }
+            if b < span - TRIM_EPS {
+                out.push(ElementData::Arc {
+                    center: *center,
+                    radius: *radius,
+                    start_angle: start_angle + b,
+                    end_angle: *end_angle,
+                });
+            }
+            Ok(out)
+        }
+        ElementData::Polyline { points, closed } => {
+            let n = points.len();
+            if n < 2 || (*closed && n < 3) {
+                return Err("Polyline is too short to break");
+            }
+            let segs = poly_segs(n, *closed) as f64;
+            let (mut s1, mut s2) = (
+                poly_click_param(points, *closed, p1),
+                poly_click_param(points, *closed, p2),
+            );
+            let mk = |v: Vec<Point>| ElementData::Polyline { points: v, closed: false };
+            if !*closed {
+                if s1 > s2 {
+                    std::mem::swap(&mut s1, &mut s2);
+                }
+                if s2 - s1 < TRIM_EPS {
+                    return Err(SAME);
+                }
+                let mut out = Vec::new();
+                if s1 > TRIM_EPS {
+                    let v = poly_sub(points, false, 0.0, s1);
+                    if v.len() >= 2 {
+                        out.push(mk(v));
+                    }
+                }
+                if s2 < segs - TRIM_EPS {
+                    let v = poly_sub(points, false, s2, segs);
+                    if v.len() >= 2 {
+                        out.push(mk(v));
+                    }
+                }
+                Ok(out)
+            } else {
+                if (s1 - s2).abs() < TRIM_EPS {
+                    return Err(SAME);
+                }
+                // ตัดช่วงจาก s1 ไป s2 ตามทิศของ polyline → เหลือจาก s2 วนไปถึง s1
+                if s2 < s1 {
+                    s2 += segs;
+                }
+                let v = poly_sub(points, true, s2, s1 + segs);
+                if v.len() < 2 {
+                    return Err(SAME);
+                }
+                Ok(vec![mk(v)])
+            }
+        }
+        _ => Err("Break works on lines, circles, arcs and polylines"),
+    }
 }
 
 // ---------------- Diagnostics ----------------
