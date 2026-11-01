@@ -288,6 +288,24 @@
                         <property name="active">true</property>
                       </object>
                     </child>
+                    <child>
+                      <object class="GtkCheckButton" id="chk_snap_perp">
+                        <property name="label">Perpendicular</property>
+                        <property name="active">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="chk_snap_tangent">
+                        <property name="label">Tangent</property>
+                        <property name="active">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="chk_snap_nearest">
+                        <property name="label">Nearest</property>
+                        <property name="active">false</property>
+                      </object>
+                    </child>
                   </object>
                 </child>
               </object>
@@ -357,7 +375,7 @@
               <object class="GtkRevealer">
                 <property name="halign">end</property>
                 <property name="valign">center</property>
-                <property name="margin-end">72</property>
+                <property name="margin-end">112</property>
                 <property name="transition-type">slide-left</property>
                 <property name="transition-duration">250</property>
                 <property name="reveal-child" bind-source="btn_layers" bind-property="active" bind-flags="sync-create"/>
@@ -424,7 +442,7 @@
               <object class="GtkRevealer" id="revealer_hatch">
                 <property name="halign">end</property>
                 <property name="valign">center</property>
-                <property name="margin-end">72</property>
+                <property name="margin-end">112</property>
                 <property name="transition-type">slide-left</property>
                 <property name="transition-duration">250</property>
                 <property name="reveal-child">false</property>
@@ -537,7 +555,7 @@
                     <property name="name">default</property>
                     <property name="child">
                       <object class="GtkBox">
-                        <property name="orientation">vertical</property>
+                        <property name="orientation">horizontal</property>
                         <property name="margin-end">12</property>
                         <style>
                           <class name="osd"/>
@@ -545,93 +563,149 @@
                           <class name="drafting-floating"/>
                         </style>
                         <child>
-                          <object class="GtkToggleButton" id="btn_layers">
-                            <property name="icon-name">layers-and-objects-symbolic</property>
-                            <property name="tooltip-text">Layers (type: la)</property>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <child>
+                              <object class="GtkToggleButton" id="btn_layers">
+                                <property name="icon-name">layers-and-objects-symbolic</property>
+                                <property name="tooltip-text">Layers (type: la)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_move">
+                                <property name="icon-name">move-tool-symbolic</property>
+                                <property name="tooltip-text">Move (M, select objects first)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_copy">
+                                <property name="icon-name">edit-copy-symbolic</property>
+                                <property name="tooltip-text">Copy (type: co, select objects first)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_mirror">
+                                <property name="icon-name">flip-h-symbolic</property>
+                                <property name="tooltip-text">Mirror (MI, select objects first)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_rotate">
+                                <property name="icon-name">rotate-cw-symbolic</property>
+                                <property name="tooltip-text">Rotate (RO, select objects first)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_scale">
+                                <property name="icon-name">transform-scale-symbolic</property>
+                                <property name="tooltip-text">Scale (SC, select objects first)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_stretch">
+                                <property name="icon-name">stretch-symbolic</property>
+                                <property name="tooltip-text">Stretch (type: st, window-select first)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_array">
+                                <property name="icon-name">grid-filled-symbolic</property>
+                                <property name="tooltip-text">Array</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_trim">
+                                <property name="icon-name">line-trim-symbolic</property>
+                                <property name="tooltip-text">Trim (T)</property>
+                              </object>
+                            </child>
                           </object>
                         </child>
                         <child>
-                          <object class="GtkButton" id="btn_array">
-                            <property name="icon-name">grid-filled-symbolic</property>
-                            <property name="tooltip-text">Array</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_mirror">
-                            <property name="icon-name">flip-h-symbolic</property>
-                            <property name="tooltip-text">Mirror (MI, select objects first)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_rotate">
-                            <property name="icon-name">rotate-cw-symbolic</property>
-                            <property name="tooltip-text">Rotate (RO, select objects first)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_scale">
-                            <property name="icon-name">transform-scale-symbolic</property>
-                            <property name="tooltip-text">Scale (SC, select objects first)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_fillet">
-                            <property name="icon-name">corner-fillet-symbolic</property>
-                            <property name="tooltip-text">Fillet (type: f 5)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_chamfer">
-                            <property name="icon-name">corner-chamfer-symbolic</property>
-                            <property name="tooltip-text">Chamfer (type: ch 5)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_offset">
-                            <property name="icon-name">outline-offset-symbolic</property>
-                            <property name="tooltip-text">Offset (O, or type: of 10)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_trim">
-                            <property name="icon-name">line-trim-symbolic</property>
-                            <property name="tooltip-text">Trim (T)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_extend">
-                            <property name="icon-name">line-extend-symbolic</property>
-                            <property name="tooltip-text">Extend (Shift in Trim mode)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_break">
-                            <property name="icon-name">scissors-symbolic</property>
-                            <property name="tooltip-text">Break (type: br)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_join">
-                            <property name="icon-name">line-join-symbolic</property>
-                            <property name="tooltip-text">Join (type: j, select objects first)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_stretch">
-                            <property name="icon-name">stretch-symbolic</property>
-                            <property name="tooltip-text">Stretch (type: st, window-select first)</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_hatch">
-                            <property name="icon-name">hatch-symbolic</property>
-                            <property name="tooltip-text">Hatch (H) - click inside a closed area</property>
-                          </object>
-                        </child>
-                        <child>
-                          <object class="GtkButton" id="btn_text">
-                            <property name="icon-name">text-t-symbolic</property>
-                            <property name="tooltip-text">Text (X, or type: tx)</property>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <child>
+                              <object class="GtkButton" id="btn_fillet">
+                                <property name="icon-name">corner-fillet-symbolic</property>
+                                <property name="tooltip-text">Fillet (type: f 5)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_chamfer">
+                                <property name="icon-name">corner-chamfer-symbolic</property>
+                                <property name="tooltip-text">Chamfer (type: ch 5)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_break">
+                                <property name="icon-name">scissors-symbolic</property>
+                                <property name="tooltip-text">Break (type: br)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_join">
+                                <property name="icon-name">line-join-symbolic</property>
+                                <property name="tooltip-text">Join (type: j, select objects first)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_hatch">
+                                <property name="icon-name">hatch-symbolic</property>
+                                <property name="tooltip-text">Hatch (H) - click inside a closed area</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_text">
+                                <property name="icon-name">text-t-symbolic</property>
+                                <property name="tooltip-text">Text (X, or type: tx)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_offset">
+                                <property name="icon-name">outline-offset-symbolic</property>
+                                <property name="tooltip-text">Offset (O, or type: of 10)</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkMenuButton" id="btn_query">
+                                <property name="icon-name">ruler-angled-symbolic</property>
+                                <property name="tooltip-text">Query: Distance (DI), Area (AA), List (LI)</property>
+                                <property name="direction">left</property>
+                                <property name="popover">
+                                  <object class="GtkPopover">
+                                    <child>
+                                      <object class="GtkBox">
+                                        <property name="orientation">vertical</property>
+                                        <child>
+                                          <object class="GtkButton" id="btn_q_dist">
+                                            <property name="label">Distance (DI)</property>
+                                            <property name="has-frame">false</property>
+                                          </object>
+                                        </child>
+                                        <child>
+                                          <object class="GtkButton" id="btn_q_area">
+                                            <property name="label">Area (AA)</property>
+                                            <property name="has-frame">false</property>
+                                          </object>
+                                        </child>
+                                        <child>
+                                          <object class="GtkButton" id="btn_q_list">
+                                            <property name="label">List (LI)</property>
+                                            <property name="has-frame">false</property>
+                                          </object>
+                                        </child>
+                                      </object>
+                                    </child>
+                                  </object>
+                                </property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkButton" id="btn_extend">
+                                <property name="icon-name">line-extend-symbolic</property>
+                                <property name="tooltip-text">Extend (Shift in Trim mode)</property>
+                              </object>
+                            </child>
                           </object>
                         </child>
                       </object>

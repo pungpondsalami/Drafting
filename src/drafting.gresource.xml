@@ -38,5 +38,8 @@
     <file>icons/scissors-symbolic.svg</file>
     <file>icons/line-join-symbolic.svg</file>
     <file>icons/stretch-symbolic.svg</file>
+    <file>icons/move-tool-symbolic.svg</file>
+    <file>icons/edit-copy-symbolic.svg</file>
+    <file>icons/ruler-angled-symbolic.svg</file>
   </gresource>
 </gresources>

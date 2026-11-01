@@ -156,6 +156,12 @@ mod imp {
         #[template_child]
         pub chk_snap_intersection: TemplateChild<gtk::CheckButton>,
         #[template_child]
+        pub chk_snap_perp: TemplateChild<gtk::CheckButton>,
+        #[template_child]
+        pub chk_snap_tangent: TemplateChild<gtk::CheckButton>,
+        #[template_child]
+        pub chk_snap_nearest: TemplateChild<gtk::CheckButton>,
+        #[template_child]
         pub btn_snap_menu: TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub btn_ortho: TemplateChild<gtk::ToggleButton>,
@@ -208,6 +214,18 @@ mod imp {
         #[template_child]
         pub btn_text: TemplateChild<gtk::Button>,
         #[template_child]
+        pub btn_move: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_copy: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_query: TemplateChild<gtk::MenuButton>,
+        #[template_child]
+        pub btn_q_dist: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_q_area: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub btn_q_list: TemplateChild<gtk::Button>,
+        #[template_child]
         pub revealer_hatch: TemplateChild<gtk::Revealer>,
         #[template_child]
         pub dd_hatch_pattern: TemplateChild<gtk::DropDown>,
@@ -244,6 +262,8 @@ mod imp {
         pub array_count: Cell<i32>,
         pub is_cancelling_array: Cell<bool>,
         pub drag_start: Cell<Option<(f64, f64)>>,
+        /// มุมแรกของกรอบลาก ในพิกัดโลก (ไม่ขยับตามการซูม/pan)
+        pub drag_world: Cell<Option<(f64, f64)>>,
         pub is_dragging: Cell<bool>,
         pub is_mouse_pressed: Cell<bool>,
         pub dimension_step: Cell<u8>,
@@ -318,12 +338,15 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj();
-            let checks: [&gtk::CheckButton; 5] = [
+            let checks: [&gtk::CheckButton; 8] = [
                 &self.chk_snap_endpoint,
                 &self.chk_snap_midpoint,
                 &self.chk_snap_center,
                 &self.chk_snap_quadrant,
                 &self.chk_snap_intersection,
+                &self.chk_snap_perp,
+                &self.chk_snap_tangent,
+                &self.chk_snap_nearest,
             ];
             for chk in checks {
                 chk.connect_toggled(glib::clone!(
@@ -480,6 +503,7 @@ mod imp {
                             gdk::Key::h | gdk::Key::H => Some(DrawingMode::Hatch),
                             gdk::Key::x | gdk::Key::X => Some(DrawingMode::Text),
                             gdk::Key::r | gdk::Key::R => Some(DrawingMode::Rectangle),
+                            gdk::Key::m | gdk::Key::M => Some(DrawingMode::MoveBase),
                             _ => None,
                         };
                         if let Some(mode) = tool {
@@ -963,6 +987,46 @@ mod imp {
                 }
             ));
 
+            self.btn_move.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::MoveBase)
+            ));
+
+            self.btn_copy.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.set_tool(DrawingMode::CopyBase)
+            ));
+
+            self.btn_q_dist.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    obj.imp().btn_query.popdown();
+                    obj.set_tool(DrawingMode::Distance)
+                }
+            ));
+
+            self.btn_q_area.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    obj.imp().btn_query.popdown();
+                    obj.set_tool(DrawingMode::Area)
+                }
+            ));
+
+            self.btn_q_list.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    obj.imp().btn_query.popdown();
+                    let msg = obj.with_engine(|d| d.list_selected()).unwrap_or_default();
+                    *obj.imp().offset_msg.borrow_mut() = msg;
+                }
+            ));
+
             self.btn_stretch.connect_clicked(glib::clone!(
                 #[weak]
                 obj,
@@ -1091,6 +1155,13 @@ mod imp {
                             true
                         } else if matches!(
                             obj.imp().current_mode.get(),
+                            DrawingMode::MoveBase | DrawingMode::CopyBase
+                        ) && obj.imp().start_pos.get().is_some()
+                            && obj.apply_typed_displacement(&text)
+                        {
+                            true
+                        } else if matches!(
+                            obj.imp().current_mode.get(),
                             DrawingMode::Rotate | DrawingMode::Scale
                         ) && obj.imp().start_pos.get().is_some()
                             && text.parse::<f64>().is_ok()
@@ -1184,6 +1255,16 @@ mod imp {
                             "el" | "ellipse" => obj.set_tool(DrawingMode::Ellipse),
                             "br" | "break" => obj.set_tool(DrawingMode::Break),
                             "st" | "stretch" => obj.set_tool(DrawingMode::Stretch),
+                            "m" | "move" => obj.set_tool(DrawingMode::MoveBase),
+                            "co" | "cp" => obj.set_tool(DrawingMode::CopyBase),
+                            "di" | "dist" | "distance" => obj.set_tool(DrawingMode::Distance),
+                            "aa" | "area" => obj.set_tool(DrawingMode::Area),
+                            "li" | "list" => {
+                                let msg = obj
+                                    .with_engine(|d| d.list_selected())
+                                    .unwrap_or_default();
+                                *obj.imp().offset_msg.borrow_mut() = msg;
+                            }
                             "j" | "join" => {
                                 let n = obj.with_engine(|d| d.join_selected()).unwrap_or(0);
                                 *obj.imp().offset_msg.borrow_mut() = if n == 0 {
@@ -1374,6 +1455,75 @@ impl DraftingWindow {
     }
 
     /// พิมพ์องศา/ตัวคูณใน command bar ตอน Rotate / Scale (หลังคลิกจุดฐานแล้ว)
+    /// ตั้งจุดอ้างอิงให้ Perpendicular / Tangent ตามคำสั่งที่กำลังทำ
+    fn snap_base(&self) -> Option<(f64, f64)> {
+        let imp = self.imp();
+        match imp.current_mode.get() {
+            DrawingMode::Line
+            | DrawingMode::Circle
+            | DrawingMode::Rectangle
+            | DrawingMode::Ellipse
+            | DrawingMode::Mirror
+            | DrawingMode::Rotate
+            | DrawingMode::Scale
+            | DrawingMode::Stretch
+            | DrawingMode::Distance
+            | DrawingMode::MoveBase
+            | DrawingMode::CopyBase => imp.start_pos.get(),
+            DrawingMode::Dimension if imp.dimension_step.get() == 1 => imp.start_pos.get(),
+            DrawingMode::Polyline | DrawingMode::Arc => {
+                imp.pending_points.borrow().last().map(|p| (p.x, p.y))
+            }
+            _ => None,
+        }
+    }
+
+    fn sync_snap_from(&self, d: &crate::engine::Engine) {
+        d.snap_from.set(self.snap_base().map(|(x, y)| Point { x, y }));
+    }
+
+    /// Move / Copy: พิมพ์ระยะ (ไปทางเมาส์) หรือ dx,dy แล้ว Enter คืน true ถ้าเป็นตัวเลขที่ใช้ได้
+    fn apply_typed_displacement(&self, text: &str) -> bool {
+        let imp = self.imp();
+        let Some((bx, by)) = imp.start_pos.get() else { return false };
+        let nums: Vec<f64> = text
+            .split(',')
+            .map(|s| s.trim().parse::<f64>())
+            .collect::<Result<_, _>>()
+            .unwrap_or_default();
+        if nums.is_empty() || nums.len() > 2 || nums.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+        let (dx, dy) = if nums.len() == 2 {
+            (nums[0], nums[1])
+        } else {
+            let (mx, my) = imp.mouse_pos.get();
+            let (wx, wy) = self
+                .with_engine(|d| d.camera.screen_to_world(mx, my))
+                .unwrap_or((bx + 1.0, by));
+            let (mut ux, mut uy) = (wx - bx, wy - by);
+            if imp.ortho.get() {
+                if ux.abs() >= uy.abs() {
+                    uy = 0.0;
+                } else {
+                    ux = 0.0;
+                }
+            }
+            let l = ux.hypot(uy);
+            let (ux, uy) = if l < 1e-12 { (1.0, 0.0) } else { (ux / l, uy / l) };
+            (ux * nums[0], uy * nums[0])
+        };
+        let copy = imp.current_mode.get() == DrawingMode::CopyBase;
+        let n = self.with_engine(|d| d.displace_selected(dx, dy, copy)).unwrap_or(0);
+        if n == 0 {
+            *imp.offset_msg.borrow_mut() = "Nothing moved".into();
+        } else if !copy {
+            imp.start_pos.set(None);
+            imp.current_mode.set(DrawingMode::Select);
+        }
+        true
+    }
+
     fn apply_typed_transform(&self, v: f64) {
         let imp = self.imp();
         let mode = imp.current_mode.get();
@@ -1422,7 +1572,14 @@ impl DraftingWindow {
         let imp = self.imp();
         let mut mode = mode;
         let mut hint = String::new();
-        if matches!(mode, DrawingMode::Mirror | DrawingMode::Rotate | DrawingMode::Scale) {
+        if matches!(
+            mode,
+            DrawingMode::Mirror
+                | DrawingMode::Rotate
+                | DrawingMode::Scale
+                | DrawingMode::MoveBase
+                | DrawingMode::CopyBase
+        ) {
             let any = imp
                 .tab_view
                 .selected_page()
@@ -1437,6 +1594,8 @@ impl DraftingWindow {
                 hint = match mode {
                     DrawingMode::Rotate => "Select objects first, then Rotate (RO)",
                     DrawingMode::Scale => "Select objects first, then Scale (SC)",
+                    DrawingMode::MoveBase => "Select objects first, then Move (M)",
+                    DrawingMode::CopyBase => "Select objects first, then Copy (CO)",
                     _ => "Select objects first, then Mirror (MI)",
                 }
                 .to_string();
@@ -1576,7 +1735,7 @@ impl DraftingWindow {
             }
         }
 
-        let buttons: [(&gtk::Button, DrawingMode); 21] = [
+        let buttons: [(&gtk::Button, DrawingMode); 23] = [
             (&imp.btn_select, DrawingMode::Select),
             (&imp.btn_line, DrawingMode::Line),
             (&imp.btn_circle, DrawingMode::Circle),
@@ -1598,6 +1757,8 @@ impl DraftingWindow {
             (&imp.btn_chamfer, DrawingMode::Chamfer),
             (&imp.btn_hatch, DrawingMode::Hatch),
             (&imp.btn_text, DrawingMode::Text),
+            (&imp.btn_move, DrawingMode::MoveBase),
+            (&imp.btn_copy, DrawingMode::CopyBase),
         ];
 
         for (btn, m) in buttons {
@@ -2218,12 +2379,14 @@ impl DraftingWindow {
 
                     // 1. แปลงพิกัดจอเป็นพิกัดโลก
                     let (wx, wy) = d.camera.screen_to_world(x, y);
+                    obj.sync_snap_from(&d);
 
                     // 2. เช็คโหมดปัจจุบัน
                     match imp.current_mode.get() {
                         DrawingMode::Select => {
                             let (_wx, _wy) = d.camera.screen_to_world(x, y);
                             imp.drag_start.set(Some((x, y)));
+                            imp.drag_world.set(Some((_wx, _wy)));
                             imp.is_dragging.set(false);
 
                             let hit_selected = d
@@ -2706,7 +2869,65 @@ impl DraftingWindow {
                                 d.camera.world_to_screen(sx, sy)
                             };
                             imp.drag_start.set(Some((px, py)));
+                            imp.drag_world.set(Some(d.camera.screen_to_world(px, py)));
                             imp.is_dragging.set(false);
+                        }
+
+                        DrawingMode::Distance => {
+                            let (sx, sy, sk) = d.get_input_snap(
+                                wx,
+                                wy,
+                                imp.snap_enabled.get(),
+                                &imp.snap_settings.get(),
+                            );
+                            let (sx, sy) = if sk.is_none() { obj.ortho_apply((sx, sy)) } else { (sx, sy) };
+                            match imp.start_pos.get() {
+                                None => imp.start_pos.set(Some((sx, sy))),
+                                Some((ax, ay)) => {
+                                    let (dx, dy) = (sx - ax, sy - ay);
+                                    *imp.offset_msg.borrow_mut() = format!(
+                                        "Distance = {:.4}    ΔX = {:.4}    ΔY = {:.4}    Angle = {:.2}°",
+                                        dx.hypot(dy),
+                                        dx,
+                                        dy,
+                                        dy.atan2(dx).to_degrees().rem_euclid(360.0)
+                                    );
+                                    imp.start_pos.set(None);
+                                    imp.current_mode.set(DrawingMode::Select);
+                                }
+                            }
+                        }
+
+                        DrawingMode::Area => {
+                            *imp.offset_msg.borrow_mut() = match d.area_at(wx, wy) {
+                                Ok((a, p, kind)) => {
+                                    format!("{} area = {:.4}    perimeter = {:.4}", kind, a, p)
+                                }
+                                Err(m) => m.to_string(),
+                            };
+                            imp.current_mode.set(DrawingMode::Select);
+                        }
+
+                        DrawingMode::MoveBase | DrawingMode::CopyBase => {
+                            let (sx, sy, sk) = d.get_input_snap(
+                                wx,
+                                wy,
+                                imp.snap_enabled.get(),
+                                &imp.snap_settings.get(),
+                            );
+                            let (sx, sy) = if sk.is_none() { obj.ortho_apply((sx, sy)) } else { (sx, sy) };
+                            match imp.start_pos.get() {
+                                None => imp.start_pos.set(Some((sx, sy))),
+                                Some((bx, by)) => {
+                                    let copy = imp.current_mode.get() == DrawingMode::CopyBase;
+                                    if d.displace_selected(sx - bx, sy - by, copy) == 0 {
+                                        *imp.offset_msg.borrow_mut() = "Pick a different second point".into();
+                                    } else if !copy {
+                                        imp.start_pos.set(None);
+                                        imp.current_mode.set(DrawingMode::Select);
+                                    }
+                                }
+                            }
                         }
 
                         DrawingMode::Move => {}
@@ -2753,6 +2974,7 @@ impl DraftingWindow {
                 // --- ลากกรอบซูม (Z > W) ---
                 if imp.current_mode.get() == DrawingMode::PrintWindow && imp.zoom_window.get() {
                     let start = imp.drag_start.get();
+                    let start_w = imp.drag_world.get();
                     let dragging = imp.is_dragging.get();
                     imp.drag_start.set(None);
                     imp.is_dragging.set(false);
@@ -2761,7 +2983,7 @@ impl DraftingWindow {
                             imp.zoom_window.set(false);
                             imp.current_mode.set(DrawingMode::Select);
                             obj.zoom_do(|d, w, h| {
-                                let a = d.camera.screen_to_world(sx, sy);
+                                let a = start_w.unwrap_or_else(|| d.camera.screen_to_world(sx, sy));
                                 let b = d.camera.screen_to_world(x, y);
                                 d.camera.focus_on_area(
                                     Point { x: a.0.min(b.0), y: a.1.min(b.1) },
@@ -2783,7 +3005,7 @@ impl DraftingWindow {
                                 let pages = imp.pages.borrow();
                                 pages.get(&page).and_then(|d_ref| {
                                     let d = d_ref.borrow();
-                                    let a = d.camera.screen_to_world(sx, sy);
+                                    let a = imp.drag_world.get().unwrap_or_else(|| d.camera.screen_to_world(sx, sy));
                                     let b0 = d.camera.screen_to_world(x, y);
                                     let (bx, by, _) = d.get_input_snap_ex(
                                         b0.0,
@@ -2828,8 +3050,10 @@ impl DraftingWindow {
                         let mut d = d_ref.borrow_mut();
                         if imp.is_dragging.get() {
                             if let Some((sx, sy)) = imp.drag_start.get() {
-                                let (wx1, wy1) = d.camera.screen_to_world(sx, sy);
+                                let (wx1, wy1) =
+                                    imp.drag_world.get().unwrap_or_else(|| d.camera.screen_to_world(sx, sy));
                                 let (wx2, wy2) = d.camera.screen_to_world(x, y);
+                                let (sx, _) = d.camera.world_to_screen(wx1, wy1);
                                 let crossing = x < sx;
                                 d.select_in_box(wx1, wy1, wx2, wy2, crossing, is_shift);
                             }
@@ -2851,6 +3075,7 @@ impl DraftingWindow {
                     if let Some(d_ref) = pages.get(&page) {
                         let mut d = d_ref.borrow_mut();
                         let (wx, wy) = d.camera.screen_to_world(x, y);
+                        obj.sync_snap_from(&d);
                         let (ex, ey, ek) = d.get_input_snap(
                             wx,
                             wy,
@@ -2997,6 +3222,7 @@ impl DraftingWindow {
         let (rx, ry) = imp.mouse_pos.get();
 
         // --- Snap position ---
+        self.sync_snap_from(&d);
         let (wx, wy) = cam.screen_to_world(rx, ry);
         let (sn_x, sn_y, snap_kind) = d.get_input_snap_ex(
             wx,
@@ -3125,6 +3351,7 @@ impl DraftingWindow {
                 DrawingMode::Array => {}
                 DrawingMode::Move => {}
                 DrawingMode::Arc | DrawingMode::Polyline | DrawingMode::Offset => {}
+                DrawingMode::Area => {}
                 DrawingMode::Trim => {}
                 DrawingMode::Extend => {}
                 DrawingMode::Hatch | DrawingMode::Text => {}
@@ -3148,7 +3375,13 @@ impl DraftingWindow {
                         cr.restore().ok(); // path อยู่ต่อ เส้นเขียนด้วยเมทริกซ์ปกติ ความหนาไม่เพี้ยน
                     }
                 }
-                DrawingMode::Mirror | DrawingMode::Rotate | DrawingMode::Scale | DrawingMode::Stretch => {
+                DrawingMode::Mirror
+                | DrawingMode::Rotate
+                | DrawingMode::Scale
+                | DrawingMode::Stretch
+                | DrawingMode::Distance
+                | DrawingMode::MoveBase
+                | DrawingMode::CopyBase => {
                     let (psx, psy) = cam.world_to_screen(sx, sy);
                     let (pex, pey) = cam.world_to_screen(sn_x, sn_y);
                     cr.move_to(psx, psy);
@@ -3601,6 +3834,20 @@ impl DraftingWindow {
             }
         }
 
+        // --- Move / Copy ghost ---
+        if matches!(imp.current_mode.get(), DrawingMode::MoveBase | DrawingMode::CopyBase) {
+            if let Some((bx, by)) = imp.start_pos.get() {
+                let ghosts = d.displace_preview(sn_x - bx, sn_y - by, 3000);
+                cr.new_path();
+                cr.set_source_rgba(1.0, 0.5, 0.0, 0.7);
+                cr.set_line_width(1.5);
+                for g in &ghosts {
+                    trace_ghost(cr, cam, g);
+                }
+                let _ = cr.stroke();
+            }
+        }
+
         // --- Break: จุดแรก ---
         if imp.current_mode.get() == DrawingMode::Break {
             if let Some((_, (x1, y1))) = imp.corner_first.get() {
@@ -3663,7 +3910,12 @@ impl DraftingWindow {
         if imp.is_dragging.get()
             && matches!(imp.current_mode.get(), DrawingMode::Select | DrawingMode::PrintWindow)
         {
-            if let Some((sx, sy)) = imp.drag_start.get() {
+            if let Some((sx0, sy0)) = imp.drag_start.get() {
+                let (sx, sy) = imp
+                    .drag_world
+                    .get()
+                    .map(|(a, b)| cam.world_to_screen(a, b))
+                    .unwrap_or((sx0, sy0));
                 let (mut mx, mut my) = imp.mouse_pos.get();
                 if imp.current_mode.get() == DrawingMode::PrintWindow && !imp.zoom_window.get() {
                     (mx, my) = cam.world_to_screen(sn_x, sn_y);
@@ -3753,6 +4005,25 @@ impl DraftingWindow {
                     cr.move_to(mx + r, my - r);
                     cr.line_to(mx - r, my + r);
                 }
+                SnapKind::Perpendicular => {
+                    cr.move_to(mx - r, my - r);
+                    cr.line_to(mx - r, my + r);
+                    cr.line_to(mx + r, my + r);
+                    cr.rectangle(mx - r, my + r - 5.0, 5.0, 5.0);
+                }
+                SnapKind::Tangent => {
+                    cr.new_sub_path();
+                    cr.arc(mx, my + 2.0, r - 1.5, 0.0, 2.0 * std::f64::consts::PI);
+                    cr.move_to(mx - r, my - r + 1.0);
+                    cr.line_to(mx + r, my - r + 1.0);
+                }
+                SnapKind::Nearest => {
+                    cr.move_to(mx - r, my - r);
+                    cr.line_to(mx + r, my - r);
+                    cr.line_to(mx - r, my + r);
+                    cr.line_to(mx + r, my + r);
+                    cr.close_path();
+                }
             }
             let _ = cr.stroke();
         }
@@ -3781,6 +4052,10 @@ impl DraftingWindow {
             DrawingMode::Ellipse => "ELLIPSE",
             DrawingMode::Break => "BREAK",
             DrawingMode::Stretch => "STRETCH",
+            DrawingMode::Distance => "DISTANCE",
+            DrawingMode::Area => "AREA",
+            DrawingMode::MoveBase => "MOVE",
+            DrawingMode::CopyBase => "COPY",
             DrawingMode::PrintWindow => {
                 if imp.zoom_window.get() { "ZOOM WINDOW" } else { "PRINT WINDOW" }
             }
@@ -3835,6 +4110,22 @@ impl DraftingWindow {
             }
         } else if imp.current_mode.get() == DrawingMode::Text {
             "  click where the text goes".to_string()
+        } else if imp.current_mode.get() == DrawingMode::Distance {
+            if imp.start_pos.get().is_none() {
+                "  click first point".to_string()
+            } else {
+                "  click second point".to_string()
+            }
+        } else if imp.current_mode.get() == DrawingMode::Area {
+            "  click inside a closed object (circle, closed polyline, hatch)".to_string()
+        } else if matches!(imp.current_mode.get(), DrawingMode::MoveBase | DrawingMode::CopyBase) {
+            if imp.start_pos.get().is_none() {
+                "  click base point".to_string()
+            } else if imp.current_mode.get() == DrawingMode::CopyBase {
+                "  click second point, or type distance / dx,dy + Enter | Esc: finish".to_string()
+            } else {
+                "  click second point, or type distance / dx,dy + Enter".to_string()
+            }
         } else if imp.current_mode.get() == DrawingMode::Mirror {
             if imp.start_pos.get().is_none() {
                 "  click first point of mirror line".to_string()
@@ -3934,7 +4225,12 @@ impl DraftingWindow {
         }
         match imp.current_mode.get() {
             DrawingMode::Line => imp.start_pos.get(),
-            DrawingMode::Mirror | DrawingMode::Rotate | DrawingMode::Stretch => imp.start_pos.get(),
+            DrawingMode::Mirror
+            | DrawingMode::Rotate
+            | DrawingMode::Stretch
+            | DrawingMode::MoveBase
+            | DrawingMode::CopyBase
+            | DrawingMode::Distance => imp.start_pos.get(),
             DrawingMode::Dimension if imp.dimension_step.get() == 1 => imp.start_pos.get(),
             DrawingMode::Polyline => imp.pending_points.borrow().last().map(|p| (p.x, p.y)),
             _ => None,
@@ -3969,6 +4265,9 @@ impl DraftingWindow {
             center: imp.chk_snap_center.is_active(),
             quadrant: imp.chk_snap_quadrant.is_active(),
             intersection: imp.chk_snap_intersection.is_active(),
+            perpendicular: imp.chk_snap_perp.is_active(),
+            tangent: imp.chk_snap_tangent.is_active(),
+            nearest: imp.chk_snap_nearest.is_active(),
         });
         if let Some(page) = imp.tab_view.selected_page() {
             page.child().queue_draw();
@@ -4513,8 +4812,9 @@ impl DraftingWindow {
         imp.toast_revealer.set_reveal_child(true);
         let id = imp.toast_seq.get().wrapping_add(1);
         imp.toast_seq.set(id);
+        let ms = (2800 + msg.chars().count() as u64 * 35).min(9000);
         glib::timeout_add_local_once(
-            std::time::Duration::from_millis(2800),
+            std::time::Duration::from_millis(ms),
             glib::clone!(
                 #[weak(rename_to = obj)]
                 self,
@@ -4735,27 +5035,123 @@ impl DraftingWindow {
         setup.set_left_margin(PRINT_MARGIN_MM, gtk::Unit::Mm);
         setup.set_right_margin(PRINT_MARGIN_MM, gtk::Unit::Mm);
 
-        let op = gtk::PrintOperation::new();
-        op.set_job_name(page.title().as_str());
-        op.set_n_pages(1);
-        op.set_unit(gtk::Unit::Mm);
-        op.set_default_page_setup(Some(&setup));
-        op.connect_draw_page(move |_, ctx, _| {
-            let cr = ctx.cairo_context();
-            let (aw, ah) = (ctx.width() / PX_MM, ctx.height() / PX_MM);
+        let preview_cmds = cmds.clone();
+        let job = page.title().to_string();
+        let obj = self.clone();
+        let go = move || {
+            let op = gtk::PrintOperation::new();
+            op.set_job_name(&job);
+            op.set_n_pages(1);
+            op.set_unit(gtk::Unit::Mm);
+            op.set_default_page_setup(Some(&setup));
+            op.connect_draw_page(move |_, ctx, _| {
+                let cr = ctx.cairo_context();
+                let (aw, ah) = (ctx.width() / PX_MM, ctx.height() / PX_MM);
+                cr.scale(PX_MM, PX_MM);
+                cr.translate(((aw - bw) / 2.0).max(0.0), ((ah - bh) / 2.0).max(0.0));
+                cr.rectangle(0.0, 0.0, bw, bh);
+                cr.clip();
+                if let Some((cx0, cy0, cw, ch)) = clip {
+                    cr.rectangle(cx0, cy0, cw, ch);
+                    cr.clip();
+                }
+                CairoRenderer::new(&cr).draw_commands(cmds.clone());
+            });
+            if let Err(e) = op.run(gtk::PrintOperationAction::PrintDialog, Some(&obj)) {
+                obj.show_error("Can't print", &e.to_string());
+            }
+        };
+        // หน้าต่างพิมพ์ native ของ Windows ไม่มี preview → แสดงของเราเองก่อน
+        if cfg!(target_os = "windows") {
+            self.show_print_preview(pw, ph, bw, bh, clip, preview_cmds, go);
+        } else {
+            go();
+        }
+    }
+
+    /// Preview หน้ากระดาษ (ขนาด/ขอบ/ส่วนที่จะพิมพ์) แล้วกด Print… เพื่อไปหน้าต่างพิมพ์
+    #[allow(clippy::too_many_arguments)]
+    fn show_print_preview(
+        &self,
+        pw: f64,
+        ph: f64,
+        bw: f64,
+        bh: f64,
+        clip: Option<(f64, f64, f64, f64)>,
+        cmds: Vec<RenderCommand>,
+        go: impl FnOnce() + 'static,
+    ) {
+        let imp = self.imp();
+        let view_w = 460.0_f64;
+        let view_h = (view_w * ph / pw).clamp(120.0, 560.0);
+        let k = (view_w / pw).min(view_h / ph); // px ต่อ มม.
+        let area = gtk::DrawingArea::builder()
+            .content_width((pw * k).ceil() as i32)
+            .content_height((ph * k).ceil() as i32)
+            .halign(gtk::Align::Center)
+            .build();
+        area.set_draw_func(move |_, cr, _, _| {
+            // กระดาษ
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.rectangle(0.0, 0.0, pw * k, ph * k);
+            let _ = cr.fill_preserve();
+            cr.set_source_rgb(0.55, 0.55, 0.55);
+            cr.set_line_width(1.0);
+            let _ = cr.stroke();
+            // เนื้อหา (เหมือนตอนพิมพ์จริง)
+            let _ = cr.save();
+            cr.scale(k, k);
+            cr.translate(PRINT_MARGIN_MM, PRINT_MARGIN_MM);
             cr.scale(PX_MM, PX_MM);
-            cr.translate(((aw - bw) / 2.0).max(0.0), ((ah - bh) / 2.0).max(0.0));
             cr.rectangle(0.0, 0.0, bw, bh);
             cr.clip();
             if let Some((cx0, cy0, cw, ch)) = clip {
                 cr.rectangle(cx0, cy0, cw, ch);
                 cr.clip();
             }
-            CairoRenderer::new(&cr).draw_commands(cmds.clone());
+            CairoRenderer::new(cr).draw_commands(cmds.clone());
+            let _ = cr.restore();
+            // เส้นขอบพื้นที่พิมพ์
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.25);
+            cr.set_dash(&[3.0, 3.0], 0.0);
+            cr.rectangle(
+                PRINT_MARGIN_MM * k,
+                PRINT_MARGIN_MM * k,
+                (pw - 2.0 * PRINT_MARGIN_MM) * k,
+                (ph - 2.0 * PRINT_MARGIN_MM) * k,
+            );
+            let _ = cr.stroke();
         });
-        if let Err(e) = op.run(gtk::PrintOperationAction::PrintDialog, Some(self)) {
-            self.show_error("Can't print", &e.to_string());
-        }
+
+        let dialog = adw::AlertDialog::new(Some("Print preview"), None);
+        dialog.add_responses(&[("cancel", "_Cancel"), ("ok", "_Print…")]);
+        dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("ok"));
+        dialog.set_close_response("cancel");
+        dialog.set_extra_child(Some(&area));
+
+        imp.is_dialog_open.set(true);
+        dialog.connect_closed(glib::clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |_| {
+                obj.imp().is_dialog_open.set(false);
+                if let Some(page) = obj.imp().tab_view.selected_page() {
+                    page.child().grab_focus();
+                }
+            }
+        ));
+        let go = std::cell::RefCell::new(Some(go));
+        dialog.connect_response(None, move |_, response| {
+            if response != "ok" {
+                return;
+            }
+            if let Some(f) = go.borrow_mut().take() {
+                // เปิดหน้าต่างพิมพ์หลังกล่องนี้ปิดสนิท
+                glib::idle_add_local_once(f);
+            }
+        });
+        dialog.present(Some(self));
     }
 
     // ---------------- Copy / Cut / Paste ----------------

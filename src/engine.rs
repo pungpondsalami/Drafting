@@ -81,6 +81,14 @@ pub enum ToolMode {
     Stretch,
     /// ลากกรอบเลือกพื้นที่พิมพ์ (กล่องพิมพ์ > Area > Window)
     PrintWindow,
+    /// Distance (DI): คลิก 2 จุด
+    Distance,
+    /// Area (AA): คลิกวัตถุปิด
+    Area,
+    /// Move (M) ด้วย base point
+    MoveBase,
+    /// Copy (CO) ด้วย base point
+    CopyBase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,6 +98,9 @@ pub enum SnapKind {
     Center,
     Quadrant,
     Intersection,
+    Perpendicular,
+    Tangent,
+    Nearest,
 }
 
 impl SnapKind {
@@ -100,6 +111,9 @@ impl SnapKind {
             SnapKind::Center => "CENTER",
             SnapKind::Quadrant => "QUADRANT",
             SnapKind::Intersection => "INTERSECTION",
+            SnapKind::Perpendicular => "PERPENDICULAR",
+            SnapKind::Tangent => "TANGENT",
+            SnapKind::Nearest => "NEAREST",
         }
     }
 }
@@ -111,6 +125,9 @@ pub struct SnapSettings {
     pub center: bool,
     pub quadrant: bool,
     pub intersection: bool,
+    pub perpendicular: bool,
+    pub tangent: bool,
+    pub nearest: bool,
 }
 
 impl Default for SnapSettings {
@@ -121,6 +138,9 @@ impl Default for SnapSettings {
             center: true,
             quadrant: true,
             intersection: true,
+            perpendicular: true,
+            tangent: true,
+            nearest: false,
         }
     }
 }
@@ -133,6 +153,9 @@ impl SnapSettings {
             SnapKind::Center => self.center,
             SnapKind::Quadrant => self.quadrant,
             SnapKind::Intersection => self.intersection,
+            SnapKind::Perpendicular => self.perpendicular,
+            SnapKind::Tangent => self.tangent,
+            SnapKind::Nearest => self.nearest,
         }
     }
 }
@@ -908,6 +931,8 @@ pub struct Engine {
     pub anim_hidden: Vec<u64>,
     index_stale: bool,
     zoom_cap_key: (usize, u64),
+    /// จุดอ้างอิงของ Perpendicular / Tangent (window ตั้งทุกครั้งก่อน snap)
+    pub snap_from: std::cell::Cell<Option<Point>>,
 }
 
 impl Engine {
@@ -942,6 +967,7 @@ impl Engine {
             anim_hidden: Vec::new(),
             index_stale: false,
             zoom_cap_key: (usize::MAX, 0),
+            snap_from: std::cell::Cell::new(None),
         }
     }
 
@@ -1497,6 +1523,157 @@ impl Engine {
             }
         }
         out
+    }
+
+    // ---------------- Query / Move-Copy ----------------
+
+    /// Area: พื้นที่และเส้นรอบรูปของวัตถุปิดที่คลิก → (พื้นที่, เส้นรอบรูป, ชนิด)
+    /// คลิกตรงเส้น หรือคลิกข้างในวัตถุปิด (ซ้อนกันเลือกชิ้นที่เล็กสุด)
+    pub fn area_at(&self, wx: f64, wy: f64) -> Result<(f64, f64, &'static str), &'static str> {
+        const ERR: &str = "Click on or inside a closed object (circle, closed polyline or hatch)";
+        let p = Point { x: wx, y: wy };
+        if let Some(i) = self.pick_at(wx, wy).and_then(|id| self.index_of(id)) {
+            if let Some(r) = closed_area(&self.history[i].data) {
+                return Ok(r);
+            }
+        }
+        let mut best: Option<(f64, f64, &'static str)> = None;
+        for i in 0..self.history.len() {
+            if !self.pickable(i) {
+                continue;
+            }
+            let d = &self.history[i].data;
+            let inside = match d {
+                ElementData::Circle { center, radius } => (p.x - center.x).hypot(p.y - center.y) < *radius,
+                ElementData::Polyline { points, closed: true } if points.len() >= 3 => {
+                    point_in_loops(p, std::slice::from_ref(points))
+                }
+                ElementData::Hatch { .. } | ElementData::Fill { .. } => d.fill_contains(p),
+                _ => false,
+            };
+            if !inside {
+                continue;
+            }
+            if let Some(r) = closed_area(d) {
+                if best.map_or(true, |b| r.0 < b.0) {
+                    best = Some(r);
+                }
+            }
+        }
+        best.ok_or(ERR)
+    }
+
+    /// List: รายละเอียดของวัตถุที่เลือก (สูงสุด 8 ชิ้น)
+    pub fn list_selected(&self) -> String {
+        let f = |v: f64| format!("{:.3}", v);
+        let sel: Vec<&DrawingElement> = self.history.iter().filter(|e| e.is_selected).collect();
+        if sel.is_empty() {
+            return "Select objects first, then LIST (LI)".to_string();
+        }
+        let mut lines: Vec<String> = Vec::new();
+        for e in sel.iter().take(8) {
+            let layer = &self.layers[e.layer].name;
+            let body = match &e.data {
+                ElementData::Line { start, end } => {
+                    let (dx, dy) = (end.x - start.x, end.y - start.y);
+                    format!(
+                        "LINE  ({}, {}) → ({}, {})  length {}  angle {}°",
+                        f(start.x),
+                        f(start.y),
+                        f(end.x),
+                        f(end.y),
+                        f(dx.hypot(dy)),
+                        f(dy.atan2(dx).to_degrees().rem_euclid(360.0))
+                    )
+                }
+                ElementData::Circle { center, radius } => format!(
+                    "CIRCLE  center ({}, {})  radius {}  circumference {}  area {}",
+                    f(center.x),
+                    f(center.y),
+                    f(*radius),
+                    f(TAU * radius),
+                    f(std::f64::consts::PI * radius * radius)
+                ),
+                ElementData::Arc { center, radius, start_angle, end_angle } => format!(
+                    "ARC  center ({}, {})  radius {}  {}° → {}°  length {}",
+                    f(center.x),
+                    f(center.y),
+                    f(*radius),
+                    f(start_angle.to_degrees().rem_euclid(360.0)),
+                    f(end_angle.to_degrees()),
+                    f(radius * (end_angle - start_angle))
+                ),
+                ElementData::Polyline { points, closed } => {
+                    let mut s = format!(
+                        "POLYLINE  {} points  {}  length {}",
+                        points.len(),
+                        if *closed { "closed" } else { "open" },
+                        f(loop_len(points, *closed))
+                    );
+                    if *closed && points.len() >= 3 {
+                        s.push_str(&format!("  area {}", f(loop_area_signed(points).abs())));
+                    }
+                    s
+                }
+                ElementData::Dimension { start, end, .. } => {
+                    format!("DIMENSION  {}", f((end.x - start.x).hypot(end.y - start.y)))
+                }
+                ElementData::Text { pos, height, text, .. } => format!(
+                    "TEXT  \"{}\"  at ({}, {})  height {}",
+                    text.lines().next().unwrap_or(""),
+                    f(pos.x),
+                    f(pos.y),
+                    f(*height)
+                ),
+                ElementData::Fill { loops, .. } => format!("FILL  {} loop(s)", loops.len()),
+                ElementData::Hatch { loops, .. } => format!("HATCH  {} loop(s)", loops.len()),
+            };
+            lines.push(format!("{}   [{}]", body, layer));
+        }
+        if sel.len() > 8 {
+            lines.push(format!("… and {} more", sel.len() - 8));
+        }
+        lines.join("\n")
+    }
+
+    /// Move / Copy ด้วยระยะ (dx, dy): copy = สร้างสำเนา (ต้นฉบับยังเลือกอยู่) คืนจำนวนชิ้น
+    pub fn displace_selected(&mut self, dx: f64, dy: f64, copy: bool) -> usize {
+        if !(dx.is_finite() && dy.is_finite()) || dx.hypot(dy) < 1e-12 {
+            return 0;
+        }
+        let ids: Vec<u64> = self.history.iter().filter(|e| e.is_selected).map(|e| e.id).collect();
+        if ids.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        if copy {
+            let copies: Vec<DrawingElement> = self
+                .history
+                .iter()
+                .filter(|e| e.is_selected)
+                .map(|e| e.cloned_with_offset(0, dx, dy))
+                .collect();
+            for mut c in copies {
+                c.id = self.get_next_id();
+                self.add_element(c);
+            }
+        } else {
+            for e in self.history.iter_mut().filter(|e| e.is_selected) {
+                e.data.translate(dx, dy);
+            }
+            self.rebuild_index();
+        }
+        self.hovered_id = None;
+        ids.len()
+    }
+
+    /// ภาพเงาของ Move / Copy (ว่างถ้าเลือกเกิน limit ชิ้น)
+    pub fn displace_preview(&self, dx: f64, dy: f64, limit: usize) -> Vec<ElementData> {
+        self.preview_with(limit, &|e| {
+            let mut c = e.clone();
+            c.translate(dx, dy);
+            c
+        })
     }
 
     pub fn delete_selected(&mut self) -> usize {
@@ -2860,7 +3037,11 @@ impl Engine {
             }
             // จุดสำคัญ (endpoint/center/intersection) ได้แต้มต่อเล็กน้อย
             let bonus = match kind {
-                SnapKind::Endpoint | SnapKind::Center | SnapKind::Intersection => tol * 0.25,
+                SnapKind::Endpoint
+                | SnapKind::Center
+                | SnapKind::Intersection
+                | SnapKind::Perpendicular
+                | SnapKind::Tangent => tol * 0.25,
                 _ => 0.0,
             };
             let score = d - bonus;
@@ -2929,6 +3110,37 @@ impl Engine {
             }
         }
 
+        // Perpendicular / Tangent: ต้องมีจุดอ้างอิง (จุดก่อนหน้าของคำสั่งที่กำลังทำ)
+        if let Some(f) = self.snap_from.get() {
+            for data in &elems {
+                for prim in prims(data) {
+                    match prim {
+                        Prim::Seg(a, b) => {
+                            if let Some(p) = foot_on_seg(f, a, b) {
+                                consider(p, SnapKind::Perpendicular);
+                            }
+                        }
+                        Prim::Circle { c, r } => {
+                            for p in circle_perp(f, c, r) {
+                                consider(p, SnapKind::Perpendicular);
+                            }
+                            for p in circle_tangent(f, c, r) {
+                                consider(p, SnapKind::Tangent);
+                            }
+                        }
+                        Prim::Arc { c, r, s, e } => {
+                            for p in circle_perp(f, c, r).into_iter().filter(|p| on_arc(*p, c, s, e)) {
+                                consider(p, SnapKind::Perpendicular);
+                            }
+                            for p in circle_tangent(f, c, r).into_iter().filter(|p| on_arc(*p, c, s, e)) {
+                                consider(p, SnapKind::Tangent);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if settings.intersection {
             let n = elems.len().min(32);
             let lists: Vec<Vec<Prim>> = elems[..n].iter().map(|d| prims(d)).collect();
@@ -2942,6 +3154,25 @@ impl Engine {
                         }
                     }
                 }
+            }
+        }
+
+        // Nearest: จุดบนเส้นที่ใกล้เมาส์สุด ใช้เมื่อไม่มี snap อื่นเลย
+        if best.is_none() && settings.nearest {
+            let cur = Point { x: wx, y: wy };
+            let mut nb: Option<(f64, Point)> = None;
+            for data in &elems {
+                for prim in prims(data) {
+                    if let Some(p) = nearest_on_prim(cur, &prim) {
+                        let d = (p.x - wx).hypot(p.y - wy);
+                        if d <= tol && nb.map_or(true, |(bd, _)| d < bd) {
+                            nb = Some((d, p));
+                        }
+                    }
+                }
+            }
+            if let Some((d, p)) = nb {
+                best = Some((d, p, SnapKind::Nearest));
             }
         }
 
@@ -4352,6 +4583,136 @@ fn break_data(data: &ElementData, p1: Point, p2: Point) -> Result<Vec<ElementDat
             }
         }
         _ => Err("Break works on lines, circles, arcs and polylines"),
+    }
+}
+
+// ---------------- Osnap: Perpendicular / Tangent / Nearest ----------------
+
+/// ตีนเส้นตั้งฉากจากจุด f ลงบนส่วนของเส้นตรง a→b (เฉพาะที่ตกบนส่วนนั้น)
+fn foot_on_seg(f: Point, a: Point, b: Point) -> Option<Point> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let l2 = dx * dx + dy * dy;
+    if l2 < 1e-18 {
+        return None;
+    }
+    let t = ((f.x - a.x) * dx + (f.y - a.y) * dy) / l2;
+    if !(-1e-9..=1.0 + 1e-9).contains(&t) {
+        return None;
+    }
+    Some(Point { x: a.x + dx * t, y: a.y + dy * t })
+}
+
+/// จุดบนวงกลมที่เส้นรัศมีผ่านจุด f (ตั้งฉากกับวงกลม): ใกล้สุดและไกลสุด
+fn circle_perp(f: Point, c: Point, r: f64) -> Vec<Point> {
+    let (vx, vy) = (f.x - c.x, f.y - c.y);
+    let l = vx.hypot(vy);
+    if l < 1e-9 {
+        return vec![];
+    }
+    let (ux, uy) = (vx / l, vy / l);
+    vec![
+        Point { x: c.x + ux * r, y: c.y + uy * r },
+        Point { x: c.x - ux * r, y: c.y - uy * r },
+    ]
+}
+
+/// จุดสัมผัสของเส้นสัมผัสวงกลมที่ลากจากจุด f (ว่างถ้า f อยู่ในหรือบนวงกลม)
+fn circle_tangent(f: Point, c: Point, r: f64) -> Vec<Point> {
+    let (vx, vy) = (f.x - c.x, f.y - c.y);
+    let l = vx.hypot(vy);
+    if r <= 0.0 || l <= r + 1e-9 {
+        return vec![];
+    }
+    let th = vy.atan2(vx);
+    let al = (r / l).acos();
+    [th + al, th - al]
+        .iter()
+        .map(|a| Point { x: c.x + r * a.cos(), y: c.y + r * a.sin() })
+        .collect()
+}
+
+/// จุดบนเส้นที่ใกล้จุด p ที่สุด
+fn nearest_on_prim(p: Point, prim: &Prim) -> Option<Point> {
+    match prim {
+        Prim::Seg(a, b) => {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let l2 = dx * dx + dy * dy;
+            let t = if l2 < 1e-18 {
+                0.0
+            } else {
+                (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0)
+            };
+            Some(Point { x: a.x + dx * t, y: a.y + dy * t })
+        }
+        Prim::Circle { c, r } => {
+            let (vx, vy) = (p.x - c.x, p.y - c.y);
+            let l = vx.hypot(vy);
+            if l < 1e-12 {
+                None
+            } else {
+                Some(Point { x: c.x + vx / l * r, y: c.y + vy / l * r })
+            }
+        }
+        Prim::Arc { c, r, s, e } => {
+            let (vx, vy) = (p.x - c.x, p.y - c.y);
+            let l = vx.hypot(vy);
+            if l > 1e-12 && on_arc(p, *c, *s, *e) {
+                Some(Point { x: c.x + vx / l * r, y: c.y + vy / l * r })
+            } else {
+                let (ps, pe) = (arc_point(*c, *r, *s), arc_point(*c, *r, *e));
+                if (p.x - ps.x).hypot(p.y - ps.y) <= (p.x - pe.x).hypot(p.y - pe.y) {
+                    Some(ps)
+                } else {
+                    Some(pe)
+                }
+            }
+        }
+    }
+}
+
+/// พื้นที่ของ loop (shoelace, มีเครื่องหมายตามทิศ)
+fn loop_area_signed(pts: &[Point]) -> f64 {
+    let n = pts.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut s = 0.0;
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        s += a.x * b.y - b.x * a.y;
+    }
+    s / 2.0
+}
+
+/// ความยาวเส้นรอบ/ความยาวของ polyline
+fn loop_len(pts: &[Point], closed: bool) -> f64 {
+    let n = pts.len();
+    let segs = if closed { n } else { n.saturating_sub(1) };
+    (0..segs)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            (b.x - a.x).hypot(b.y - a.y)
+        })
+        .sum()
+}
+
+/// พื้นที่ / เส้นรอบรูป / ชนิด ของวัตถุปิด (None = ไม่ใช่วัตถุปิด)
+fn closed_area(data: &ElementData) -> Option<(f64, f64, &'static str)> {
+    match data {
+        ElementData::Circle { radius, .. } => {
+            Some((std::f64::consts::PI * radius * radius, TAU * radius, "Circle"))
+        }
+        ElementData::Polyline { points, closed: true } if points.len() >= 3 => {
+            Some((loop_area_signed(points).abs(), loop_len(points, true), "Polyline"))
+        }
+        ElementData::Fill { loops, .. } | ElementData::Hatch { loops, .. } if !loops.is_empty() => {
+            // loop แรก = ขอบนอก ที่เหลือ = รู
+            let outer = loop_area_signed(&loops[0]).abs();
+            let holes: f64 = loops[1..].iter().map(|l| loop_area_signed(l).abs()).sum();
+            let perim: f64 = loops.iter().map(|l| loop_len(l, true)).sum();
+            Some(((outer - holes).max(0.0), perim, "Hatch"))
+        }
+        _ => None,
     }
 }
 
