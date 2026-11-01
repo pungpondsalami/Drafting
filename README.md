@@ -8,8 +8,8 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 
 ## Features
 
-- Draw lines, circles, 3-point arcs, polylines and linear dimensions
-- Object snap: endpoint, midpoint, center, quadrant and intersection, each toggleable from the snap settings dock
+- Draw lines, circles, 3-point arcs, polylines, rectangles, ellipses and linear dimensions
+- Object snap: endpoint, midpoint, center, quadrant, intersection, perpendicular, tangent and nearest, each toggleable from the snap settings dock
 - Grid snapping with adaptive LOD grid (snaps to every minor grid step)
 - Ortho mode (`F8` or the Ortho button): lock lines, polylines, dimensions, the mirror axis and the rotate angle to horizontal or vertical; object snap overrides it
 - Offset (line, circle, arc, polyline) with preview; the result is made on the click and a short animation plays over it
@@ -17,6 +17,10 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Rotate and Scale the selected objects about a base point, with a live preview, the angle or factor shown on screen, or typed in the command bar; `Shift` keeps the originals
 - Fillet and Chamfer two straight lines, with a preview that shows the corner collapsing as you hover over the second line
 - Explode polylines into separate lines (`xp`)
+- Break (`br`) removes the part between two points of a line, arc, circle or polyline; Join (`j`) merges lines and open polylines that touch end to end; Stretch (`st`) moves the points inside a crossing window
+- Move (`M`) and Copy (`co`) with a base point, a typed distance or `dx,dy`; Copy repeats until `Esc`
+- Query: Distance (`di`), Area (`aa`) and List (`li`)
+- Short notifications above the command bar for results and errors
 - Trim and Extend (line, arc, circle, polyline) with live preview; hold `Shift` to swap between the two
 - Hatch: click inside a closed area and the boundary is found for you (circles inside are left out); lines, cross or solid, with angle and spacing
 - Text: click a point and type in a box (several lines, height, rotation); double-click a text or a hatch to edit it
@@ -27,10 +31,10 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Model / Layout switch (AutoCAD style): sheets with several viewports, each with its own scale (1:50, 1:100, ...), saved in the DXF and printed as one page
 - Copy, cut and paste between drawings
 - Autosave: unsaved drawings are backed up every 2 minutes and offered back after a crash
-- Print (`Ctrl+P`): A0 to A4 or Letter, landscape or portrait, the current view or everything, fit to page or a fixed scale (1:1 to 1:500); choose a printer or save a PDF
+- Print (`Ctrl+P`): A0 to A4 or Letter, landscape or portrait, the current view, everything or a window you drag, fit to page or a fixed scale (1:1 to 1:500); choose a printer or save a PDF (on Windows a page preview is shown first)
 - Rectangular array with preview
-- Multi-select with window/crossing selection (AutoCAD-style)
-- Move tool with snap
+- Multi-select with window/crossing selection (AutoCAD-style); the box stays anchored to the drawing when you zoom or pan while dragging
+- Drag the selected objects to move them, with snap
 - Undo / Redo
 - Command bar interface
 - AutoCAD-style crosshair: a short red cross (size set with `cursorsize`) with a pick box when selecting
@@ -38,6 +42,7 @@ A simple 2D CAD application for Linux, built with GTK4 and libadwaita. A Windows
 - Pan with the middle mouse button, `Space` + drag, or a two-finger scroll on a touchpad; zoom with the wheel, `Ctrl` + scroll or a pinch
 - Wide zoom range (units are mm); the zoom-in limit shrinks for very large drawings so Cairo stays accurate
 - Zoom to fit ignores a few far-away stray objects so the real drawing fills the view; `ze` zooms to everything
+- AutoCAD-style `Z` zoom prompt: `e` extents, `a` all, `w` window, `p` previous, or a factor such as `2x`
 - Text and MText display (read, move, copy and save)
 - Open DXF and DWG files (DWG is read-only; Save writes DXF)
 - Block inserts and dimensions from other CAD programs
@@ -143,16 +148,18 @@ cargo run
 | `E` | Extend tool (`Shift`: trim) |
 | `H` | Hatch tool |
 | `X` | Text tool |
+| `R` | Rectangle tool |
+| `M` | Move the selected objects |
 | `Delete` | Delete the selected objects |
 | `S` | Select mode |
-| `Z` | Zoom to cursor |
+| `Z` | ZOOM prompt (`e`, `a`, `w`, `p` or a factor) |
 | `Ctrl` + `F` | Zoom to fit (in a layout: fit the sheet) |
 | `F8` | Toggle Ortho |
 | `F9` | Toggle Snap |
 | `Ctrl` + `P` | Print |
 | `Ctrl` + `C` / `X` / `V` | Copy / Cut / Paste (`Ctrl` + `Shift` + `V` pastes in place) |
 
-Rotate, Scale, Mirror, Fillet, Chamfer and Explode have no single-key shortcut; use the buttons or the command bar. In a layout the single-key tool shortcuts are off.
+Copy, Rotate, Scale, Mirror, Fillet, Chamfer, Break, Join, Stretch, Explode and the queries have no single-key shortcut; use the buttons or the command bar. In a layout the single-key tool shortcuts are off.
 
 ## Command Bar
 
@@ -170,6 +177,16 @@ Type commands in the command bar at the bottom:
 | `mi`, `mirror` | Mirror the selected objects (select first) |
 | `ro`, `rotate` | Rotate the selected objects (select first) |
 | `sc`, `scale` | Scale the selected objects (select first) |
+| `rec`, `rect`, `rectangle` | Rectangle tool |
+| `el`, `ellipse` | Ellipse tool |
+| `m`, `move` | Move the selected objects with a base point (select first) |
+| `co`, `cp` | Copy the selected objects with a base point (select first) |
+| `br`, `break` | Break tool |
+| `j`, `join` | Join the selected lines and open polylines that touch end to end |
+| `st`, `stretch` | Stretch (window-select right to left first) |
+| `di`, `dist`, `distance` | Distance between two points |
+| `aa`, `area` | Area and perimeter of a circle, closed polyline or hatch |
+| `li`, `list` | Details of the selected objects |
 | `f`, `fillet`, `f [radius]` | Fillet two lines |
 | `ch`, `chamfer`, `ch [dist]` | Chamfer two lines |
 | `xp`, `explode` | Explode the selected polylines into lines |
@@ -182,7 +199,7 @@ Type commands in the command bar at the bottom:
 | `cursorsize [1-100]` | Crosshair size in % of the view (100 = full screen) |
 | `fit` | Zoom to fit (ignores far-away strays) |
 | `ze`, `extents` | Zoom to every object |
-| `z` | Zoom in at cursor |
+| `z`, `zoom` | ZOOM prompt: `e` extents, `a` all, `w` window, `p` previous, or a factor (`zoom 2x`) |
 | `u`, `undo` | Undo |
 | `r`, `redo` | Redo |
 | `o`, `open` | Open a DXF or DWG file |
@@ -230,11 +247,32 @@ Backups are kept in `~/.local/share/drafting/autosave` (inside the Flatpak: `~/.
 `Ctrl+P` (or `print`) opens the print settings:
 
 - **Paper**: A4, A3, A2, A1, A0 or Letter, landscape or portrait, with a 10 mm margin.
-- **Area**: what you see now, or everything.
+- **Area**: what you see now, everything, or a **Window**: after pressing Print… drag a rectangle on the drawing (object snap works; `Esc` cancels).
 - **Scale**: fit to the page, or 1:1 up to 1:500 centred on the area (drawings are in mm).
 - **Lines**: black, or the layer colours (white becomes black).
 
-The next window picks the printer, or "Print to File" for a PDF. Line weights print at their real size (0.25 mm = 0.25 mm). Selection highlights are never printed.
+The next window picks the printer, or "Print to File" for a PDF. Line weights print at their real size (0.25 mm = 0.25 mm). Selection highlights are never printed. The Windows print window has no preview of its own, so Drafting shows a page preview first; press Print… there to continue.
+
+## Move and Copy
+
+Select objects, then press `M` (Move) or type `co` (Copy), or use the buttons in the right dock. With nothing selected the tool does not start and a hint is shown.
+
+1. Click the **base point** (object snap works).
+2. Click the **second point**, or type a distance and press Enter (the objects go that far toward the pointer), or type `dx,dy`. A preview follows the pointer.
+
+Move finishes after one go. Copy keeps the originals and repeats from the same base point until you press `Esc`. Ortho locks the direction, and each step can be undone.
+
+## Query
+
+- **Distance** (`di`): click two points; the distance, ΔX, ΔY and angle are shown.
+- **Area** (`aa`): click a circle, a closed polyline or a hatch (on its line or inside it; when shapes are nested the smallest one under the click is used) to get its area and perimeter. A hatch with islands subtracts the islands.
+- **List** (`li`): the type, layer, position and size of the selected objects (the first 8).
+
+The buttons are in the Query menu of the right dock. Results appear as a short notification above the command bar.
+
+## Object snap
+
+Endpoint, midpoint, center, quadrant and intersection snap as you hover. **Perpendicular** and **Tangent** use the previous point of the current command (for example the first point of a line) as their reference, so they only appear once a first point is picked. **Nearest** snaps to the closest point on any object and is off by default so it does not override the grid. Turn each one on or off from the snap settings dock.
 
 ## Trim and Extend
 
