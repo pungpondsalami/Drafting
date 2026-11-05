@@ -1,0 +1,39 @@
+name: drafting
+title: Drafting
+base: core26
+adopt-info: drafting
+summary: 2D CAD application for GNOME
+description: |
+  Drafting is a 2D CAD application with DXF import/export, object snaps,
+  layers, hatching, dimensions and printing.
+license: GPL-3.0
+grade: devel
+confinement: strict
+
+apps:
+  drafting:
+    command: usr/bin/drafting
+    extensions: [gnome]
+    common-id: com.pungpondsalami.drafting
+    desktop: usr/share/applications/com.pungpondsalami.drafting.desktop
+    plugs: [home, removable-media]
+
+parts:
+  drafting:
+    plugin: meson
+    source: .
+    meson-parameters:
+      - --prefix=/usr
+      - --buildtype=release
+    build-snaps:
+      - rustup
+    build-packages:
+      - gettext
+      - desktop-file-utils
+      - appstream
+    override-build: |
+      rustup default stable
+      craftctl default
+      craftctl set version="$(git describe --tags --always 2>/dev/null || echo 0.1.0)"
+    parse-info:
+      - usr/share/metainfo/com.pungpondsalami.drafting.metainfo.xml
