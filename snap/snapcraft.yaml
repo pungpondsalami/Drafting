@@ -1,4 +1,4 @@
-name: drafting
+name: Drafting
 title: Drafting
 base: core26
 adopt-info: drafting
@@ -17,6 +17,13 @@ apps:
     common-id: com.pungpondsalami.drafting
     desktop: usr/share/applications/com.pungpondsalami.drafting.desktop
     plugs: [home, removable-media]
+    slots: [dbus-drafting]
+
+slots:
+  dbus-drafting:
+    interface: dbus
+    bus: session
+    name: com.pungpondsalami.drafting
 
 parts:
   drafting:
